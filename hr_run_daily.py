@@ -33,6 +33,12 @@ FEATURE_COLS = [
 
 PITCH_TYPES = ["FF", "SI", "SL", "CH", "CU", "FC", "FS"]  # common buckets
 
+# Bullpen integration (sniper-safe)
+DEFAULT_W_BP = 0.40                 # expected share of hitter PAs vs bullpen
+W_BP_MIN, W_BP_MAX = 0.25, 0.55     # clamp w_bp
+BP_MIN, BP_MAX = 0.85, 1.15         # clamp bullpen factor
+BULLPEN_PRIOR_STRENGTH = 3000       # shrinkage strength (higher = more stable)
+
 
 # -------------------------
 # Utils
@@ -51,6 +57,10 @@ def shrink_rate(successes, trials, prior_mean, prior_strength):
     return (successes + a) / (trials + a + b)
 
 
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
 def sim_hr_probs(p_pa: float, exp_pa: float, n_sims: int, seed: int = 42):
     rng = np.random.default_rng(seed)
     pa = rng.poisson(lam=max(exp_pa, 0.05), size=n_sims)
@@ -64,6 +74,19 @@ def get_json(url: str, timeout: int = 25):
     r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (HRBoard)"})
     r.raise_for_status()
     return r.json()
+
+
+def bullpen_adjustment_multiplier(bullpen_factor: float, w_bp: float = DEFAULT_W_BP) -> float:
+    """
+    Sniper-safe bullpen blend:
+      mult = 1 + w_bp*(bullpen_factor - 1)
+
+    bullpen_factor: team bullpen HR/PA factor vs league (e.g., 1.08 = +8% HR allowed)
+    w_bp: expected share of hitter PAs vs bullpen (0.25–0.55 typical)
+    """
+    w_bp = clamp(float(w_bp), W_BP_MIN, W_BP_MAX)
+    bullpen_factor = clamp(float(bullpen_factor), BP_MIN, BP_MAX)
+    return 1.0 + w_bp * (bullpen_factor - 1.0)
 
 
 # -------------------------
@@ -82,7 +105,6 @@ def get_player_name(player_id: int) -> str:
 
     name = str(player_id)
     try:
-        # statsapi.get returns a dict; "people" is a list
         j = statsapi.get("person", {"personId": player_id})
         people = j.get("people", [])
         if people and isinstance(people[0], dict):
@@ -227,21 +249,83 @@ def compute_park_factors(stat_df: pd.DataFrame) -> pd.DataFrame:
     return park[["home_team", "park_hr_factor_shrunk"]]
 
 
-def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def compute_bullpen_factors(stat_all: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build bullpen HR/PA factors by team from Statcast training data.
+
+    Method:
+    - Infer pitching team using inning_topbot + home/away team fields.
+    - For each game + pitching team: starter = first pitcher to appear.
+    - Bullpen PA = all other pitchers' PA for that team in that game.
+    - Compute bullpen HR/PA by team, shrink toward league avg, convert to factor vs league.
+    """
+    required = {"game_pk", "inning_topbot", "home_team", "away_team", "pitcher", "events"}
+    if not required.issubset(stat_all.columns):
+        return pd.DataFrame({"team": [], "bullpen_factor": []})
+
+    pa = stat_all[stat_all["events"].notna()].copy()
+    pa["is_hr"] = (pa["events"] == "home_run").astype(int)
+
+    pa["pitching_team"] = np.where(
+        pa["inning_topbot"].astype(str).str.lower().str.startswith("top"),
+        pa["home_team"],   # top: away bats -> home pitches
+        pa["away_team"],   # bot: home bats -> away pitches
+    )
+
+    sort_cols = ["game_pk", "pitching_team", "inning"]
+    if "at_bat_number" in pa.columns:
+        sort_cols.append("at_bat_number")
+
+    pa_sorted = pa.sort_values(sort_cols)
+
+    starters = (
+        pa_sorted.groupby(["game_pk", "pitching_team"])["pitcher"]
+        .first()
+        .reset_index()
+        .rename(columns={"pitcher": "starter_pitcher"})
+    )
+
+    pa2 = pa.merge(starters, on=["game_pk", "pitching_team"], how="left")
+    bullpen_pa = pa2[pa2["pitcher"] != pa2["starter_pitcher"]].copy()
+
+    if bullpen_pa.empty:
+        return pd.DataFrame({"team": [], "bullpen_factor": []})
+
+    team_bp = bullpen_pa.groupby("pitching_team").agg(
+        PA=("events", "size"),
+        HR=("is_hr", "sum"),
+    ).reset_index().rename(columns={"pitching_team": "team"})
+
+    league_hr_pa = float(team_bp["HR"].sum() / team_bp["PA"].sum()) if team_bp["PA"].sum() > 0 else 0.032
+
+    team_bp["bp_hr_pa_shrunk"] = team_bp.apply(
+        lambda r: shrink_rate(r["HR"], r["PA"], prior_mean=league_hr_pa, prior_strength=BULLPEN_PRIOR_STRENGTH),
+        axis=1
+    )
+
+    team_bp["bullpen_factor"] = team_bp["bp_hr_pa_shrunk"] / max(league_hr_pa, 1e-6)
+    team_bp["bullpen_factor"] = team_bp["bullpen_factor"].clip(lower=BP_MIN, upper=BP_MAX)
+
+    return team_bp[["team", "bullpen_factor"]]
+
+
+def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     key = "_".join(map(str, train_seasons))
     bat_path = f"data/processed/bat_{key}.parquet"
     pit_path = f"data/processed/pit_{key}.parquet"
     mix_path = f"data/processed/mix_{key}.parquet"
     dmg_path = f"data/processed/dmg_{key}.parquet"
     park_path = f"data/processed/park_{key}.parquet"
+    bp_path = f"data/processed/bullpen_{key}.parquet"
 
-    if all(os.path.exists(p) for p in [bat_path, pit_path, mix_path, dmg_path, park_path]):
+    if all(os.path.exists(p) for p in [bat_path, pit_path, mix_path, dmg_path, park_path, bp_path]):
         return (
             pd.read_parquet(bat_path),
             pd.read_parquet(pit_path),
             pd.read_parquet(mix_path),
             pd.read_parquet(dmg_path),
             pd.read_parquet(park_path),
+            pd.read_parquet(bp_path),
         )
 
     all_stat = []
@@ -267,14 +351,16 @@ def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.Data
 
     mix_p, dmg_b = build_pitch_mix_and_batter_damage(stat_all)
     park = compute_park_factors(stat_all)
+    bullpen = compute_bullpen_factors(stat_all)
 
     bat_all.to_parquet(bat_path, index=False)
     pit_all.to_parquet(pit_path, index=False)
     mix_p.to_parquet(mix_path, index=False)
     dmg_b.to_parquet(dmg_path, index=False)
     park.to_parquet(park_path, index=False)
+    bullpen.to_parquet(bp_path, index=False)
 
-    return bat_all, pit_all, mix_p, dmg_b, park
+    return bat_all, pit_all, mix_p, dmg_b, park, bullpen
 
 
 # -------------------------
@@ -436,7 +522,7 @@ def temp_multiplier(temp_f: float | None) -> float:
 # Build Board
 # -------------------------
 def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weather: bool):
-    bat_df, pit_df, mix_df, dmg_df, park_df = get_training_cached(train_seasons)
+    bat_df, pit_df, mix_df, dmg_df, park_df, bullpen_df = get_training_cached(train_seasons)
     model, calib, meta = train_or_load_hr_model(bat_df, train_seasons)
 
     bat_latest = bat_df.sort_values("season").groupby("batter").tail(1).set_index("batter")
@@ -444,6 +530,8 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
     park_map = dict(zip(park_df["home_team"], park_df["park_hr_factor_shrunk"]))
     mix_map = mix_df.set_index("pitcher").to_dict(orient="index")
     dmg_map = dmg_df.set_index("batter").to_dict(orient="index")
+
+    bullpen_map = dict(zip(bullpen_df.get("team", []), bullpen_df.get("bullpen_factor", [])))
 
     coords = load_stadium_coords()
     games = get_games(date_str)
@@ -476,6 +564,11 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
             pitcher_id = home_sp_id if side == "away" else away_sp_id
             is_home = (side == "home")
 
+            # Opposing bullpen factor (pitching team = home if away bats, else away)
+            pitching_team = home if side == "away" else away
+            bullpen_factor = float(bullpen_map.get(pitching_team, 1.0))
+            bp_mult = bullpen_adjustment_multiplier(bullpen_factor, w_bp=DEFAULT_W_BP)
+
             hitter_ids = get_team_hitters(batting_team)
 
             for hid in hitter_ids:
@@ -507,7 +600,9 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                         pt_mult = float(np.clip((weighted / max(baseline, 1e-6)), 0.85, 1.20))
 
                 env_mult = float(np.clip(park_factor * w_mult, 0.80, 1.30))
-                p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult, 1e-6, 0.30))
+
+                # ✅ Apply bullpen multiplier here (sniper-safe)
+                p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult, 1e-6, 0.30))
 
                 pa_last = float(bat_latest.loc[hid, "PA"])
                 games_proxy = max(pa_last / 4.2, 1.0)
