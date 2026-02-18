@@ -1,7 +1,5 @@
 import os
-import re
 import json
-import math
 import argparse
 from datetime import date as date_cls
 
@@ -62,6 +60,42 @@ def sim_hr_probs(p_pa: float, exp_pa: float, n_sims: int, seed: int = 42):
     return p1, p2
 
 
+def get_json(url: str, timeout: int = 25):
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (HRBoard)"})
+    r.raise_for_status()
+    return r.json()
+
+
+# -------------------------
+# Player name cache
+# -------------------------
+PLAYER_NAME_CACHE: dict[int, str] = {}
+
+
+def get_player_name(player_id: int) -> str:
+    """
+    Resolve MLBAM player_id -> full name via statsapi 'person' endpoint.
+    Cached per run to avoid spamming.
+    """
+    if player_id in PLAYER_NAME_CACHE:
+        return PLAYER_NAME_CACHE[player_id]
+
+    name = str(player_id)
+    try:
+        # statsapi.get returns a dict; "people" is a list
+        j = statsapi.get("person", {"personId": player_id})
+        people = j.get("people", [])
+        if people and isinstance(people[0], dict):
+            nm = people[0].get("fullName")
+            if nm:
+                name = nm
+    except Exception:
+        pass
+
+    PLAYER_NAME_CACHE[player_id] = name
+    return name
+
+
 # -------------------------
 # Statcast Pull + Feature Building
 # -------------------------
@@ -82,8 +116,6 @@ def batter_pitcher_tables(stat_df: pd.DataFrame, season: int) -> tuple[pd.DataFr
     pa["is_bb"] = (pa["events"] == "walk").astype(int)
 
     bbe = pa[pa["launch_speed"].notna() & pa["launch_angle"].notna()].copy()
-
-    # simple barrel proxy (conservative starter)
     bbe["is_barrel_proxy"] = ((bbe["launch_speed"] >= 98) & (bbe["launch_angle"].between(26, 30))).astype(int)
 
     bat_pa = pa.groupby(["batter", "season"]).agg(
@@ -179,7 +211,6 @@ def compute_park_factors(stat_df: pd.DataFrame) -> pd.DataFrame:
         BBE=("is_hr", "size"),
         HR=("is_hr", "sum"),
     ).reset_index()
-    park["hr_bbe"] = park["HR"] / park["BBE"].clip(lower=1)
 
     park["park_hr_factor_shrunk"] = park.apply(
         lambda r: shrink_rate(
@@ -191,6 +222,8 @@ def compute_park_factors(stat_df: pd.DataFrame) -> pd.DataFrame:
         axis=1
     )
 
+    # Convert HR/BBE back into factor vs league
+    park["park_hr_factor_shrunk"] = park["park_hr_factor_shrunk"] / max(league_hr_bbe, 1e-6)
     return park[["home_team", "park_hr_factor_shrunk"]]
 
 
@@ -261,8 +294,8 @@ def train_or_load_hr_model(bat_df: pd.DataFrame, train_seasons: list[int]):
         return model, calib, meta
 
     df = bat_df.copy()
-
     league_hr_pa = float(df["HR"].sum() / df["PA"].sum()) if df["PA"].sum() > 0 else 0.032
+
     df["hr_rate_shrunk"] = df.apply(
         lambda r: shrink_rate(r["HR"], r["PA"], prior_mean=league_hr_pa, prior_strength=250),
         axis=1
@@ -325,47 +358,37 @@ def lookup_player_id_by_name(name: str):
 
 
 def get_team_hitters(team_name: str):
-    """
-    Robust MLB roster parsing.
-    Uses StatsAPI team lookup -> team_id -> roster endpoint.
-    Returns MLBAM batter_ids (ints) for non-pitchers on active roster.
-    """
     teams = statsapi.lookup_team(team_name)
     if not teams:
         return []
-
-    team_id = teams[0].get("id")
-    if not team_id:
-        return []
+    team_id = teams[0]["id"]
 
     url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster?rosterType=active"
     try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        data = r.json()
+        j = get_json(url)
     except Exception:
         return []
 
-    roster = data.get("roster", [])
+    roster = j.get("roster", []) or []
     hitters = []
 
     for item in roster:
         if not isinstance(item, dict):
             continue
 
-        person = item.get("person", {})
-        pos = item.get("position", {})
+        person = item.get("person", {}) if isinstance(item.get("person", {}), dict) else {}
+        position = item.get("position", {}) if isinstance(item.get("position", {}), dict) else {}
 
-        if not isinstance(person, dict) or not isinstance(pos, dict):
-            continue
-
-        pos_abbr = (pos.get("abbreviation") or "").upper()
+        pos_abbr = (position.get("abbreviation") or "").upper()
         if pos_abbr == "P":
             continue
 
         pid = person.get("id")
-        if pid:
-            hitters.append(int(pid))
+        if pid is not None:
+            try:
+                hitters.append(int(pid))
+            except Exception:
+                continue
 
     return hitters
 
@@ -392,7 +415,7 @@ def get_daily_temp_f(lat: float, lon: float, date_str: str) -> float | None:
         f"&start_date={date_str}&end_date={date_str}"
     )
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         j = r.json()
         temps = j.get("daily", {}).get("temperature_2m_max", [])
@@ -423,8 +446,8 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
     dmg_map = dmg_df.set_index("batter").to_dict(orient="index")
 
     coords = load_stadium_coords()
-
     games = get_games(date_str)
+
     rows = []
 
     for g in games:
@@ -459,13 +482,14 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                 if hid not in bat_latest.index:
                     continue
 
+                player_name = get_player_name(int(hid))
+
                 feat = bat_latest.loc[hid, FEATURE_COLS].to_frame().T.fillna(0.0)
 
                 p_raw = float(model.predict(feat)[0])
                 p_pa = float(calib.predict([np.clip(p_raw, 1e-6, 0.5)])[0])
                 p_pa = float(np.clip(p_pa, 1e-6, 0.25))
 
-                # pitch-type interaction multiplier
                 pt_mult = 1.0
                 if pitcher_id and pitcher_id in mix_map and hid in dmg_map:
                     mix = mix_map[pitcher_id]
@@ -485,7 +509,6 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                 env_mult = float(np.clip(park_factor * w_mult, 0.80, 1.30))
                 p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult, 1e-6, 0.30))
 
-                # Expected PA: use PA/game proxy from latest season
                 pa_last = float(bat_latest.loc[hid, "PA"])
                 games_proxy = max(pa_last / 4.2, 1.0)
                 exp_pa = float(pa_last / games_proxy)
@@ -500,6 +523,7 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                     "team": batting_team,
                     "venue": venue,
                     "probable_pitcher_faced": pitcher_name,
+                    "player_name": player_name,
                     "batter_id": int(hid),
                     "exp_pa": round(exp_pa, 2),
                     "p_hr_pa": p_pa_adj,
