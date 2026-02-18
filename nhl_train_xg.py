@@ -29,7 +29,7 @@ def get_json(url: str, timeout: int = 20, retries: int = 5):
         except Exception as e:
             last_err = e
             time.sleep(2 + i * 2)
-    raise last_err
+    raise RuntimeError(f"Failed to fetch URL after {retries} retries: {url}. Last error: {last_err}")
 
 def shot_distance_angle(x: float, y: float):
     ax, ay = abs(float(x)), abs(float(y))
