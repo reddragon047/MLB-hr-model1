@@ -47,23 +47,6 @@ def ensure_dirs():
     os.makedirs("inputs", exist_ok=True)
 
 
-def normalize_name(s: str) -> str:
-    if s is None:
-        return ""
-    s = s.lower().strip()
-    s = re.sub(r"[^a-z\s\.-]", "", s)
-    s = re.sub(r"\s+", " ", s)
-    return s
-
-
-def american_to_implied_prob(odds: float) -> float:
-    odds = float(odds)
-    if odds > 0:
-        return 100.0 / (odds + 100.0)
-    else:
-        return (-odds) / ((-odds) + 100.0)
-
-
 def shrink_rate(successes, trials, prior_mean, prior_strength):
     a = prior_mean * prior_strength
     b = (1 - prior_mean) * prior_strength
@@ -83,30 +66,24 @@ def sim_hr_probs(p_pa: float, exp_pa: float, n_sims: int, seed: int = 42):
 # Statcast Pull + Feature Building
 # -------------------------
 def pull_statcast_season(season: int) -> pd.DataFrame:
-    # broad window
     start = f"{season}-03-01"
     end = f"{season}-11-15"
     return statcast(start_dt=start, end_dt=end)
 
 
 def batter_pitcher_tables(stat_df: pd.DataFrame, season: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Build batter-season + pitcher-season aggregates from Statcast pitch-level.
-    """
     df = stat_df.copy()
     df["season"] = season
 
-    # PA-ending pitches
     pa = df[df["events"].notna()].copy()
 
     pa["is_hr"] = (pa["events"] == "home_run").astype(int)
     pa["is_k"] = (pa["events"] == "strikeout").astype(int)
     pa["is_bb"] = (pa["events"] == "walk").astype(int)
 
-    # BBE: needs EV/LA
     bbe = pa[pa["launch_speed"].notna() & pa["launch_angle"].notna()].copy()
 
-    # barrel proxy (simple starter; refine later)
+    # simple barrel proxy (conservative starter)
     bbe["is_barrel_proxy"] = ((bbe["launch_speed"] >= 98) & (bbe["launch_angle"].between(26, 30))).astype(int)
 
     bat_pa = pa.groupby(["batter", "season"]).agg(
@@ -151,23 +128,16 @@ def batter_pitcher_tables(stat_df: pd.DataFrame, season: int) -> tuple[pd.DataFr
 
 
 def build_pitch_mix_and_batter_damage(stat_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Build:
-      - pitcher pitch usage mix from all pitches
-      - batter HR/PA by pitch type from PA-ending pitches (shrunken)
-    """
     df = stat_df.copy()
     df = df[df["pitch_type"].notna()].copy()
     df["pitch_type"] = df["pitch_type"].astype(str)
 
-    # Pitcher pitch mix (all pitches)
     mix = df.groupby(["pitcher", "pitch_type"]).size().reset_index(name="n")
     tot = mix.groupby("pitcher")["n"].sum().reset_index(name="tot")
     mix = mix.merge(tot, on="pitcher", how="left")
     mix["usage"] = mix["n"] / mix["tot"].clip(lower=1)
     mix = mix[mix["pitch_type"].isin(PITCH_TYPES)].copy()
 
-    # Batter damage by pitch type (PA-ending pitches only)
     pa = df[df["events"].notna()].copy()
     pa = pa[pa["pitch_type"].isin(PITCH_TYPES)].copy()
     pa["is_hr"] = (pa["events"] == "home_run").astype(int)
@@ -186,12 +156,10 @@ def build_pitch_mix_and_batter_damage(stat_df: pd.DataFrame) -> tuple[pd.DataFra
         axis=1
     )
 
-    # Pivot to columns batter_hr_pa_FF, etc.
     damage = bat_pt.pivot_table(index="batter", columns="pitch_type", values="hr_pa_shrunk", aggfunc="mean").fillna(np.nan)
     damage.columns = [f"bat_hr_pa_{c}" for c in damage.columns]
     damage = damage.reset_index()
 
-    # Pivot mix to columns pit_usage_FF etc.
     mix_p = mix.pivot_table(index="pitcher", columns="pitch_type", values="usage", aggfunc="mean").fillna(0)
     mix_p.columns = [f"pit_usage_{c}" for c in mix_p.columns]
     mix_p = mix_p.reset_index()
@@ -200,10 +168,6 @@ def build_pitch_mix_and_batter_damage(stat_df: pd.DataFrame) -> tuple[pd.DataFra
 
 
 def compute_park_factors(stat_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Park factor from training data:
-      HR/BBE by home_team (proxy for park) vs league HR/BBE
-    """
     df = stat_df.copy()
     pa = df[df["events"].notna()].copy()
     bbe = pa[pa["launch_speed"].notna() & pa["launch_angle"].notna()].copy()
@@ -216,10 +180,7 @@ def compute_park_factors(stat_df: pd.DataFrame) -> pd.DataFrame:
         HR=("is_hr", "sum"),
     ).reset_index()
     park["hr_bbe"] = park["HR"] / park["BBE"].clip(lower=1)
-    park["park_hr_factor"] = park["hr_bbe"] / max(league_hr_bbe, 1e-6)
 
-    # shrink toward 1.0 so low-sample parks don't go crazy
-    # treat "BBE" as trials
     park["park_hr_factor_shrunk"] = park.apply(
         lambda r: shrink_rate(
             successes=r["HR"],
@@ -233,15 +194,7 @@ def compute_park_factors(stat_df: pd.DataFrame) -> pd.DataFrame:
     return park[["home_team", "park_hr_factor_shrunk"]]
 
 
-def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Returns:
-      bat_features (batter-season)
-      pit_features (pitcher-season)
-      pitch_mix (pitcher)
-      batter_damage (batter)
-      park_factors (home_team)
-    """
+def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     key = "_".join(map(str, train_seasons))
     bat_path = f"data/processed/bat_{key}.parquet"
     pit_path = f"data/processed/pit_{key}.parquet"
@@ -309,7 +262,6 @@ def train_or_load_hr_model(bat_df: pd.DataFrame, train_seasons: list[int]):
 
     df = bat_df.copy()
 
-    # league prior HR/PA
     league_hr_pa = float(df["HR"].sum() / df["PA"].sum()) if df["PA"].sum() > 0 else 0.032
     df["hr_rate_shrunk"] = df.apply(
         lambda r: shrink_rate(r["HR"], r["PA"], prior_mean=league_hr_pa, prior_strength=250),
@@ -353,8 +305,6 @@ def get_games(date_str: str):
         games.append({
             "home_team": g.get("home_name"),
             "away_team": g.get("away_name"),
-            "home_abbr": g.get("home_id"),  # not always abbr; keep name too
-            "away_abbr": g.get("away_id"),
             "venue_name": g.get("venue_name"),
             "home_probable_pitcher": g.get("home_probable_pitcher"),
             "away_probable_pitcher": g.get("away_probable_pitcher"),
@@ -368,7 +318,6 @@ def lookup_player_id_by_name(name: str):
     res = statsapi.lookup_player(name)
     if not res:
         return None
-    # pick first result
     try:
         return int(res[0]["id"])
     except Exception:
@@ -376,17 +325,48 @@ def lookup_player_id_by_name(name: str):
 
 
 def get_team_hitters(team_name: str):
+    """
+    Robust MLB roster parsing.
+    Uses StatsAPI team lookup -> team_id -> roster endpoint.
+    Returns MLBAM batter_ids (ints) for non-pitchers on active roster.
+    """
     teams = statsapi.lookup_team(team_name)
     if not teams:
         return []
-    team_id = teams[0]["id"]
-    roster = statsapi.roster(team_id, rosterType="active")
+
+    team_id = teams[0].get("id")
+    if not team_id:
+        return []
+
+    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster?rosterType=active"
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return []
+
+    roster = data.get("roster", [])
     hitters = []
-    for p in roster:
-        pos = (p.get("position") or "").lower()
-        if "pitcher" in pos:
+
+    for item in roster:
+        if not isinstance(item, dict):
             continue
-        hitters.append(int(p["person"]["id"]))
+
+        person = item.get("person", {})
+        pos = item.get("position", {})
+
+        if not isinstance(person, dict) or not isinstance(pos, dict):
+            continue
+
+        pos_abbr = (pos.get("abbreviation") or "").upper()
+        if pos_abbr == "P":
+            continue
+
+        pid = person.get("id")
+        if pid:
+            hitters.append(int(pid))
+
     return hitters
 
 
@@ -404,10 +384,6 @@ def load_stadium_coords():
 
 
 def get_daily_temp_f(lat: float, lon: float, date_str: str) -> float | None:
-    """
-    Uses open-meteo daily forecast/history.
-    If it fails, returns None and we skip weather adjustment.
-    """
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
@@ -428,12 +404,6 @@ def get_daily_temp_f(lat: float, lon: float, date_str: str) -> float | None:
 
 
 def temp_multiplier(temp_f: float | None) -> float:
-    """
-    Conservative HR carry adjustment:
-      baseline 70F
-      +10F => +4% HR
-      -10F => -4% HR
-    """
     if temp_f is None:
         return 1.0
     return float(np.clip(1.0 + 0.04 * ((temp_f - 70.0) / 10.0), 0.85, 1.20))
@@ -446,14 +416,9 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
     bat_df, pit_df, mix_df, dmg_df, park_df = get_training_cached(train_seasons)
     model, calib, meta = train_or_load_hr_model(bat_df, train_seasons)
 
-    # latest season snapshots for batter/pitcher skill + PA/game expectation
     bat_latest = bat_df.sort_values("season").groupby("batter").tail(1).set_index("batter")
-    pit_latest = pit_df.sort_values("season").groupby("pitcher").tail(1).set_index("pitcher")
 
-    # park factors
     park_map = dict(zip(park_df["home_team"], park_df["park_hr_factor_shrunk"]))
-
-    # pitch mix + batter pitch damage
     mix_map = mix_df.set_index("pitcher").to_dict(orient="index")
     dmg_map = dmg_df.set_index("batter").to_dict(orient="index")
 
@@ -473,13 +438,10 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
         home_sp_id = lookup_player_id_by_name(home_sp_name)
         away_sp_id = lookup_player_id_by_name(away_sp_name)
 
-        # park factor keyed off home team
         park_factor = float(park_map.get(home, 1.0))
 
-        # weather multiplier (optional)
         w_mult = 1.0
         if use_weather:
-            # expects coords mapping by home team name OR by venue_name
             loc = coords.get(home) or coords.get(venue)
             if loc and "lat" in loc and "lon" in loc:
                 t = get_daily_temp_f(float(loc["lat"]), float(loc["lon"]), date_str)
@@ -499,17 +461,15 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
                 feat = bat_latest.loc[hid, FEATURE_COLS].to_frame().T.fillna(0.0)
 
-                # Base HR/PA from model
                 p_raw = float(model.predict(feat)[0])
                 p_pa = float(calib.predict([np.clip(p_raw, 1e-6, 0.5)])[0])
                 p_pa = float(np.clip(p_pa, 1e-6, 0.25))
 
-                # Pitch-type interaction multiplier (if pitcher known)
+                # pitch-type interaction multiplier
                 pt_mult = 1.0
                 if pitcher_id and pitcher_id in mix_map and hid in dmg_map:
                     mix = mix_map[pitcher_id]
                     dmg = dmg_map[hid]
-                    # weighted batter HR/PA vs pitch types
                     weighted = 0.0
                     wsum = 0.0
                     for pt in PITCH_TYPES:
@@ -519,23 +479,17 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                             weighted += u * float(d)
                             wsum += u
                     if wsum > 0:
-                        # compare to league-ish baseline from meta league HR/PA
                         baseline = float(meta.get("league_hr_pa", 0.032))
-                        # multiplier bounded (conservative)
                         pt_mult = float(np.clip((weighted / max(baseline, 1e-6)), 0.85, 1.20))
 
-                # Park + weather multiplier (park applies to both teams in same park)
                 env_mult = float(np.clip(park_factor * w_mult, 0.80, 1.30))
-
                 p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult, 1e-6, 0.30))
 
-                # Expected PA: use batter PA per game from latest season (pregame-robust)
-                # Need games played: approximate by PA/4.2 if games not available; this is a proxy.
+                # Expected PA: use PA/game proxy from latest season
                 pa_last = float(bat_latest.loc[hid, "PA"])
                 games_proxy = max(pa_last / 4.2, 1.0)
                 exp_pa = float(pa_last / games_proxy)
 
-                # small home/away adjustment
                 exp_pa += (0.05 if not is_home else -0.05)
                 exp_pa = float(np.clip(exp_pa, 3.2, 5.2))
 
@@ -613,7 +567,6 @@ def main():
     board = build_board(args.date, n_sims=args.sims, train_seasons=train_seasons, use_weather=args.weather)
 
     if board.empty:
-        # always create an output file so artifact upload never fails
         pd.DataFrame([{"message": f"No board produced for {args.date}"}]).to_csv(f"outputs/NO_DATA_{args.date}.csv", index=False)
         print("No board produced.")
         return
