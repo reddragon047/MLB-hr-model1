@@ -13,10 +13,23 @@ NHL_BASE = "https://api-web.nhle.com"
 def ensure_dirs():
     os.makedirs("nhl_models", exist_ok=True)
 
-def get_json(url: str, timeout: int = 30):
-    r = requests.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+import time
+
+def get_json(url: str, timeout: int = 20, retries: int = 5):
+    last_err = None
+    for i in range(retries):
+        try:
+            r = requests.get(url, timeout=timeout)
+            # Handle rate limiting / temporary blocks
+            if r.status_code in (429, 502, 503, 504):
+                time.sleep(2 + i * 2)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            time.sleep(2 + i * 2)
+    raise last_err
 
 def shot_distance_angle(x: float, y: float):
     ax, ay = abs(float(x)), abs(float(y))
