@@ -25,4 +25,10 @@ jobs:
 
       - name: Run HR model
         run: |
-          echo "HR model placeholder — we will add the real model next step."
+          python run_daily.py --sims 100000
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: hr_board_outputs
+          path: outputs/*
