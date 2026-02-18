@@ -22,7 +22,7 @@ def get_json(url: str, timeout: int = 20, retries: int = 5):
             r = requests.get(url, timeout=timeout)
             # Handle rate limiting / temporary blocks
             if r.status_code in (429, 502, 503, 504):
-                time.sleep(2 + i * 2)
+                time.sleep(8 + i * 5) if r.status_code == 429 else (3 + i * 3)
                 continue
             r.raise_for_status()
             return r.json()
