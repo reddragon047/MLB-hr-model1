@@ -1,0 +1,40 @@
+name: HR Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Start date YYYY-MM-DD"
+        required: true
+        default: "2025-06-01"
+      end_date:
+        description: "End date YYYY-MM-DD"
+        required: true
+        default: "2025-06-30"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run backtest
+        run: |
+          python hr_backtest.py --start "${{ github.event.inputs.start_date }}" --end "${{ github.event.inputs.end_date }}" --sims 20000
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: hr_backtest_outputs
+          path: outputs/
