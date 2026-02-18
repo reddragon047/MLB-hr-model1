@@ -1,0 +1,59 @@
+name: MLB HR Bets Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Slate date YYYY-MM-DD (blank = today)"
+        required: false
+      bankroll:
+        description: "Bankroll dollars"
+        required: false
+        default: "1000"
+      frac_kelly:
+        description: "Fractional Kelly (0.25 recommended)"
+        required: false
+        default: "0.25"
+      edge_min:
+        description: "Minimum edge (model - implied). Example 0.03 = 3%"
+        required: false
+        default: "0.03"
+      max_bets:
+        description: "Max bets per day"
+        required: false
+        default: "6"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build bets
+        run: |
+          DATE_INPUT="${{ github.event.inputs.date }}"
+          BANKROLL_INPUT="${{ github.event.inputs.bankroll }}"
+          KELLY_INPUT="${{ github.event.inputs.frac_kelly }}"
+          EDGE_INPUT="${{ github.event.inputs.edge_min }}"
+          MAXBETS_INPUT="${{ github.event.inputs.max_bets }}"
+
+          if [ -z "$DATE_INPUT" ]; then
+            python hr_make_bets.py --bankroll ${BANKROLL_INPUT:-1000} --frac_kelly ${KELLY_INPUT:-0.25} --edge_min ${EDGE_INPUT:-0.03} --max_bets ${MAXBETS_INPUT:-6}
+          else
+            python hr_make_bets.py --date "$DATE_INPUT" --bankroll ${BANKROLL_INPUT:-1000} --frac_kelly ${KELLY_INPUT:-0.25} --edge_min ${EDGE_INPUT:-0.03} --max_bets ${MAXBETS_INPUT:-6}
+          fi
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlb_hr_bets_outputs
+          path: outputs/bets_*.*
