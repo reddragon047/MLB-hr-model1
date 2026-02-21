@@ -138,22 +138,10 @@ def american_to_implied_prob(odds) -> float:
     return a / (a + 100.0)
 
 def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
-    """Option 1 (CLV infrastructure):
-    - Supports odds at open + close, computes implied probs, edges, and CLV columns.
-    - Backwards compatible with the old single-file odds_input.csv.
-
-    Expected files (preferred):
-      inputs/odds_open.csv   and/or   inputs/odds_close.csv
-      (also supported at repo root: odds_open.csv / odds_close.csv)
-
-    Back-compat file:
-      inputs/odds_input.csv  (or odds_input.csv at repo root)
-
-    CSV formats:
-      player_name,odds_1plus
-      Mike Trout,+320
-      Byron Buxton,+410
-    """
+    # Option 1 (CLV infrastructure)
+    # Supports odds at open + close
+    # Computes implied probs, edges, CLV
+    # Backwards compatible with odds_input.csv
 
     # --- helpers ---
     def read_odds_file(fp: str):
