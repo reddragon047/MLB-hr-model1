@@ -952,7 +952,10 @@ def main():
         return
 
     # Merge market odds + edge if inputs/odds_input.csv (or odds_input.csv) exists
+    board["_name_key"] = board["player_name"].map(normalize_player_name)
+    board["_fb_key"] = board["_name_key"].map(name_fallback_key)
     board = market_clv.attach_clv(board)
+    
 
     write_outputs(board, args.date, top_n=args.top)
     print("\nTop 25 (by P(HR>=1) sim):")
