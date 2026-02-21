@@ -139,23 +139,9 @@ def american_to_implied_prob(odds) -> float:
     return a / (a + 100.0)
 
 def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
-    """Option 1 (CLV infrastructure):
-    - Supports odds at open + close, computes implied probs, edges, and CLV columns.
-    - Backwards compatible with the old single-file odds_input.csv.
-
-    Expected files (preferred):
-      inputs/odds_open.csv   and/or   inputs/odds_close.csv
-      (also supported at repo root: odds_open.csv / odds_close.csv)
-
-    Back-compat file:
-      inputs/odds_input.csv  (or odds_input.csv at repo root)
-
-    CSV formats:
-      player_name,odds_1plus
-      Mike Trout,+320
-      Byron Buxton,+410
+    """Legacy odds+edge helper (kept for backward compatibility).
+    Your current workflow uses inputs/market_clv.attach_clv(board) instead.
     """
-
     # --- helpers ---
     def read_odds_file(fp: str):
         if not os.path.exists(fp):
@@ -163,7 +149,6 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
         df = pd.read_csv(fp)
         if df.empty:
             return None
-        # allow a couple common column name variants
         col_name = None
         for c in df.columns:
             if c.strip().lower() in ("player_name", "name", "player"):
@@ -184,14 +169,12 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
         out = out.dropna(subset=["name_key"]).drop_duplicates(subset=["name_key"], keep="first")
         return out
 
-    # American odds -> implied prob (no vig)
-    def american_to_implied_prob(odds) -> float:
+    def american_to_implied_prob_local(odds) -> float:
         if pd.isna(odds):
             return float("nan")
         s = str(odds).strip()
         if not s:
             return float("nan")
-        # handle strings like +320, -150, 320
         try:
             v = float(s.replace("+", ""))
         except Exception:
@@ -208,16 +191,13 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
 
     board["name_key"] = board["player_name"].map(normalize_player_name)
 
-    # --- load odds files (open/close preferred) ---
     open_df = read_odds_file("inputs/odds_open.csv") or read_odds_file("odds_open.csv")
     close_df = read_odds_file("inputs/odds_close.csv") or read_odds_file("odds_close.csv")
 
-    # fallback: single odds file (treated as "open")
     if open_df is None and close_df is None:
         open_df = read_odds_file("inputs/odds_input.csv") or read_odds_file("odds_input.csv")
 
     if open_df is None and close_df is None:
-        # nothing to merge
         return board.drop(columns=["name_key"], errors="ignore")
 
     merged = board.copy()
@@ -240,14 +220,12 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
     else:
         merged["odds_close_1plus"] = float("nan")
 
-    # if we only had the old file, keep a friendly alias too
     if "odds_open_1plus" in merged.columns and "odds_1plus" not in merged.columns:
         merged["odds_1plus"] = merged["odds_open_1plus"]
 
-    merged["implied_prob_open_1plus"] = merged["odds_open_1plus"].map(american_to_implied_prob)
-    merged["implied_prob_close_1plus"] = merged["odds_close_1plus"].map(american_to_implied_prob)
+    merged["implied_prob_open_1plus"] = merged["odds_open_1plus"].map(american_to_implied_prob_local)
+    merged["implied_prob_close_1plus"] = merged["odds_close_1plus"].map(american_to_implied_prob_local)
 
-    # model prob column (this is what we compare against the market)
     model_col = "p_hr_1plus_sim" if "p_hr_1plus_sim" in merged.columns else ("p_hr_1plus" if "p_hr_1plus" in merged.columns else None)
 
     if model_col is not None:
@@ -257,22 +235,20 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
         merged["edge_open_1plus"] = float("nan")
         merged["edge_close_1plus"] = float("nan")
 
-    # CLV (probability space): positive = the market moved toward your side (close implied prob > open implied prob)
     merged["clv_prob_1plus"] = merged["implied_prob_close_1plus"] - merged["implied_prob_open_1plus"]
     merged["clv_pct_1plus"] = (merged["implied_prob_close_1plus"] / merged["implied_prob_open_1plus"]) - 1.0
 
-    # Keep your existing one-file columns for compatibility with your current board layout
-    # (these show up when only open is present)
     merged["odds_1plus"] = merged.get("odds_1plus", merged.get("odds_open_1plus"))
     merged["implied_prob_1plus"] = merged.get("implied_prob_1plus", merged.get("implied_prob_open_1plus"))
     merged["edge_1plus"] = merged.get("edge_1plus", merged.get("edge_open_1plus"))
 
-    # Sort preference: by edge_open if available, else edge_1plus, else leave as-is
     sort_col = "edge_open_1plus" if merged["edge_open_1plus"].notna().any() else ("edge_1plus" if "edge_1plus" in merged.columns else None)
     if sort_col is not None:
         merged = merged.sort_values(by=sort_col, ascending=False, na_position="last")
 
     return merged.drop(columns=["name_key"], errors="ignore")
+
+
 def get_json(url: str, timeout: int = 25):
     r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (HRBoard)"})
     r.raise_for_status()
@@ -283,9 +259,6 @@ def bullpen_adjustment_multiplier(bullpen_factor: float, w_bp: float = DEFAULT_W
     """
     Sniper-safe bullpen blend:
       mult = 1 + w_bp*(bullpen_factor - 1)
-
-    bullpen_factor: team bullpen HR/PA factor vs league (e.g., 1.08 = +8% HR allowed)
-    w_bp: expected share of hitter PAs vs bullpen (0.25–0.55 typical)
     """
     w_bp = clamp(float(w_bp), W_BP_MIN, W_BP_MAX)
     bullpen_factor = clamp(float(bullpen_factor), BP_MIN, BP_MAX)
@@ -425,17 +398,8 @@ def build_pitch_mix_and_batter_damage(stat_df: pd.DataFrame) -> tuple[pd.DataFra
 
 
 def compute_park_factors(stat_df: pd.DataFrame, k_barrel: int = 1500, k_fb: int = 2000) -> pd.DataFrame:
-    """Compute park HR conversion multipliers keyed by home_team.
-
-    We build two conversion rates and compare them to league baselines:
-      - HR per Barrel (proxy barrels via EV/LA)  -> park_barrel_mult
-      - HR per Fly Ball (proxy via launch angle) -> park_fb_mult
-
-    Both rates are shrunk toward league mean for stability.
-    """
     df = stat_df.copy()
 
-    # Only batted balls with launch metrics
     df = df[df["events"].notna()].copy()
     df = df[df["launch_speed"].notna() & df["launch_angle"].notna()].copy()
 
@@ -444,14 +408,11 @@ def compute_park_factors(stat_df: pd.DataFrame, k_barrel: int = 1500, k_fb: int 
     la = df["launch_angle"].astype(float)
     ev = df["launch_speed"].astype(float)
 
-    # Fly ball proxy (tunable)
     df["is_fb_proxy"] = ((la >= 25.0) & (la <= 50.0)).astype(int)
 
-    # Barrel proxy (consistent with batter_pitcher_tables)
     if "is_barrel_proxy" not in df.columns:
         df["is_barrel_proxy"] = ((ev >= 98.0) & (la.between(26.0, 30.0))).astype(int)
 
-    # League baselines
     league_barrels = float(df["is_barrel_proxy"].sum())
     league_hr_on_barrels = float((df["is_hr"] * df["is_barrel_proxy"]).sum())
     league_hr_per_barrel = league_hr_on_barrels / max(1.0, league_barrels)
@@ -469,11 +430,9 @@ def compute_park_factors(stat_df: pd.DataFrame, k_barrel: int = 1500, k_fb: int 
         })
     ).reset_index()
 
-    # Raw rates
     park["hr_per_barrel_raw"] = park["hr_on_barrels"] / park["barrels"].clip(lower=1.0)
     park["hr_per_fb_raw"] = park["hr_on_flyballs"] / park["flyballs"].clip(lower=1.0)
 
-    # Shrink toward league
     park["hr_per_barrel_shrunk"] = park.apply(
         lambda r: shrink_rate(
             successes=r["hr_on_barrels"],
@@ -493,7 +452,6 @@ def compute_park_factors(stat_df: pd.DataFrame, k_barrel: int = 1500, k_fb: int 
         axis=1,
     )
 
-    # Multipliers vs league baseline
     park["park_barrel_mult"] = park["hr_per_barrel_shrunk"] / max(float(league_hr_per_barrel), 1e-6)
     park["park_fb_mult"] = park["hr_per_fb_shrunk"] / max(float(league_hr_per_fb), 1e-6)
 
@@ -506,16 +464,9 @@ def compute_park_factors(stat_df: pd.DataFrame, k_barrel: int = 1500, k_fb: int 
         "hr_per_barrel_shrunk",
         "hr_per_fb_shrunk",
     ]]
-def compute_bullpen_factors(stat_all: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build bullpen HR/PA factors by team from Statcast training data.
 
-    Method:
-    - Infer pitching team using inning_topbot + home/away team fields.
-    - For each game + pitching team: starter = first pitcher to appear.
-    - Bullpen PA = all other pitchers' PA for that team in that game.
-    - Compute bullpen HR/PA by team, shrink toward league avg, convert to factor vs league.
-    """
+
+def compute_bullpen_factors(stat_all: pd.DataFrame) -> pd.DataFrame:
     required = {"game_pk", "inning_topbot", "home_team", "away_team", "pitcher", "events"}
     if not required.issubset(stat_all.columns):
         return pd.DataFrame({"team": [], "bullpen_factor": []})
@@ -525,8 +476,8 @@ def compute_bullpen_factors(stat_all: pd.DataFrame) -> pd.DataFrame:
 
     pa["pitching_team"] = np.where(
         pa["inning_topbot"].astype(str).str.lower().str.startswith("top"),
-        pa["home_team"],   # top: away bats -> home pitches
-        pa["away_team"],   # bot: home bats -> away pitches
+        pa["home_team"],
+        pa["away_team"],
     )
 
     sort_cols = ["game_pk", "pitching_team", "inning"]
@@ -589,13 +540,30 @@ def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.Data
     bat_tables = []
     pit_tables = []
 
+    # Always refresh the *current season* Statcast pull so each run captures yesterday's games.
+    # Prior seasons stay cached for speed/stability.
+    current_season = int(date_cls.today().year)
+
     for s in train_seasons:
         raw_path = f"data/raw/statcast_{s}.parquet"
-        if os.path.exists(raw_path):
-            season_df = pd.read_parquet(raw_path)
+        refresh = (int(s) == current_season)
+
+        if refresh:
+            try:
+                season_df = pull_statcast_season(s)
+                season_df.to_parquet(raw_path, index=False)
+            except Exception:
+                # If refresh pull fails (bad internet/API), fall back to cached file if it exists.
+                if os.path.exists(raw_path):
+                    season_df = pd.read_parquet(raw_path)
+                else:
+                    raise
         else:
-            season_df = pull_statcast_season(s)
-            season_df.to_parquet(raw_path, index=False)
+            if os.path.exists(raw_path):
+                season_df = pd.read_parquet(raw_path)
+            else:
+                season_df = pull_statcast_season(s)
+                season_df.to_parquet(raw_path, index=False)
 
         all_stat.append(season_df)
         bat, pit = batter_pitcher_tables(season_df, s)
@@ -825,7 +793,6 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
             pitcher_id = home_sp_id if side == "away" else away_sp_id
             is_home = (side == "home")
 
-            # Opposing bullpen factor (pitching team = home if away bats, else away)
             pitching_team = home if side == "away" else away
             bullpen_factor = float(bullpen_map.get(pitching_team, 1.0))
             bp_mult = bullpen_adjustment_multiplier(bullpen_factor, w_bp=DEFAULT_W_BP)
@@ -862,7 +829,6 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
                 env_mult = float(np.clip(park_contact_mult * w_mult, 0.80, 1.30))
 
-                # ✅ Apply bullpen multiplier here (sniper-safe)
                 p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult, 1e-6, 0.30))
 
                 pa_last = float(bat_latest.loc[hid, "PA"])
@@ -944,6 +910,12 @@ def main():
     ensure_dirs()
 
     train_seasons = [int(x.strip()) for x in args.seasons.split(",") if x.strip()]
+
+    # Ensure the current season is included so each run can refresh with the latest games.
+    current_season = int(date_cls.today().year)
+    if current_season not in train_seasons:
+        train_seasons = sorted(train_seasons + [current_season])
+
     board = build_board(args.date, n_sims=args.sims, train_seasons=train_seasons, use_weather=args.weather)
 
     if board.empty:
@@ -953,7 +925,6 @@ def main():
 
     # Attach market odds + edge + CLV (if odds files exist)
     board = market_clv.attach_clv(board)
-    
 
     write_outputs(board, args.date, top_n=args.top)
     print("\nTop 25 (by P(HR>=1) sim):")
