@@ -951,9 +951,7 @@ def main():
         print("No board produced.")
         return
 
-    # Merge market odds + edge if inputs/odds_input.csv (or odds_input.csv) exists
-    board["_name_key"] = board["player_name"].map(normalize_player_name)
-    board["_fb_key"] = board["_name_key"].map(name_fallback_key)
+    # Attach market odds + edge + CLV (if odds files exist)
     board = market_clv.attach_clv(board)
     
 
