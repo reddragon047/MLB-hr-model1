@@ -1,8 +1,13 @@
 import os
-import re
-import unicodedata
 import pandas as pd
 import numpy as np
+import re
+import unicodedata
+
+
+# -------------------------
+# Name normalization
+# -------------------------
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 
@@ -12,12 +17,15 @@ def _normalize_name(x: str) -> str:
         return ""
     s = str(x).strip().lower()
 
+    # strip accents
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
 
+    # normalize punctuation
     s = s.replace("’", "'")
     s = re.sub(r"[.\-']", "", s)
 
+    # flip "last, first"
     if "," in s:
         parts = [p.strip() for p in s.split(",") if p.strip()]
         if len(parts) >= 2:
@@ -40,12 +48,25 @@ def _fallback_key(norm: str) -> str:
     return norm
 
 
-def _american_to_implied(odds) -> float:
+# -------------------------
+# Odds helpers
+# -------------------------
+
+def _american_to_implied(odds):
     if odds is None or (isinstance(odds, float) and np.isnan(odds)):
         return np.nan
 
+    if isinstance(odds, str):
+        s = odds.strip().replace(" ", "")
+        if s == "":
+            return np.nan
+        try:
+            odds = int(s)
+        except Exception:
+            return np.nan
+
     try:
-        odds = float(str(odds).replace("+", "").strip())
+        odds = float(odds)
     except Exception:
         return np.nan
 
@@ -66,31 +87,22 @@ def _read_odds_csv(path: str):
 
     cols = {c.lower().strip(): c for c in df.columns}
 
-    name_col = None
-    for k in ("player_name", "name", "player"):
-        if k in cols:
-            name_col = cols[k]
-            break
+    if "player_name" not in cols or "odds_1plus" not in cols:
+        raise ValueError(f"{path} must contain columns: player_name, odds_1plus")
 
-    odds_col = None
-    for k in ("odds_1plus", "odds", "odds1plus", "hr_odds", "odds_hr"):
-        if k in cols:
-            odds_col = cols[k]
-            break
-
-    if name_col is None or odds_col is None:
-        return None
-
-    out = df[[name_col, odds_col]].copy()
+    out = df[[cols["player_name"], cols["odds_1plus"]]].copy()
     out.columns = ["player_name", "odds_1plus"]
 
     out["_name_key"] = out["player_name"].apply(_normalize_name)
     out["_fb_key"] = out["_name_key"].apply(_fallback_key)
 
-    out = out.dropna(subset=["_name_key"]).drop_duplicates(subset=["_name_key"], keep="first")
-
+    out = out.drop_duplicates(subset=["_fb_key"])
     return out
 
+
+# -------------------------
+# Main attach function
+# -------------------------
 
 def attach_clv(
     board: pd.DataFrame,
@@ -104,44 +116,71 @@ def attach_clv(
 
     out = board.copy()
 
-    # Always ensure keys exist
+    # ensure matching keys exist
     if "_name_key" not in out.columns:
         out["_name_key"] = out["player_name"].apply(_normalize_name)
 
     if "_fb_key" not in out.columns:
         out["_fb_key"] = out["_name_key"].apply(_fallback_key)
 
-    open_df = _read_odds_csv(open_path) or _read_odds_csv("odds_open.csv")
-    close_df = _read_odds_csv(close_path) or _read_odds_csv("odds_close.csv")
+    # read files safely
+    open_df = _read_odds_csv(open_path)
+    if open_df is None:
+        open_df = _read_odds_csv("odds_open.csv")
 
+    close_df = _read_odds_csv(close_path)
+    if close_df is None:
+        close_df = _read_odds_csv("odds_close.csv")
+
+    # fallback logic (no DataFrame truth testing)
     if open_df is None and close_df is None:
-        open_df = _read_odds_csv(fallback_path) or _read_odds_csv("odds_input.csv")
+        open_df = _read_odds_csv(fallback_path)
+        if open_df is None:
+            open_df = _read_odds_csv("odds_input.csv")
 
     if open_df is None and close_df is None:
         return out
 
-    # Merge OPEN odds
+    # -------------------------
+    # Merge OPEN
+    # -------------------------
+
     if open_df is not None:
         out = out.merge(
-            open_df[["_name_key", "odds_1plus"]].rename(columns={"odds_1plus": "odds_open_1plus"}),
-            on="_name_key",
+            open_df[["_fb_key", "odds_1plus"]].rename(
+                columns={"odds_1plus": "odds_open_1plus"}
+            ),
+            on="_fb_key",
             how="left",
         )
     else:
         out["odds_open_1plus"] = np.nan
 
-    # Merge CLOSE odds
+    # -------------------------
+    # Merge CLOSE
+    # -------------------------
+
     if close_df is not None:
         out = out.merge(
-            close_df[["_name_key", "odds_1plus"]].rename(columns={"odds_1plus": "odds_close_1plus"}),
-            on="_name_key",
+            close_df[["_fb_key", "odds_1plus"]].rename(
+                columns={"odds_1plus": "odds_close_1plus"}
+            ),
+            on="_fb_key",
             how="left",
         )
     else:
         out["odds_close_1plus"] = np.nan
 
-    out["implied_prob_open_1plus"] = out["odds_open_1plus"].map(_american_to_implied)
-    out["implied_prob_close_1plus"] = out["odds_close_1plus"].map(_american_to_implied)
+    # -------------------------
+    # Compute implied + edges
+    # -------------------------
+
+    out["implied_prob_open_1plus"] = out["odds_open_1plus"].apply(
+        _american_to_implied
+    )
+    out["implied_prob_close_1plus"] = out["odds_close_1plus"].apply(
+        _american_to_implied
+    )
 
     model_col = None
     if "p_hr_1plus_sim" in out.columns:
@@ -150,18 +189,27 @@ def attach_clv(
         model_col = "p_hr_1plus"
 
     if model_col is not None:
-        out["edge_open_1plus"] = out[model_col] - out["implied_prob_open_1plus"]
-        out["edge_close_1plus"] = out[model_col] - out["implied_prob_close_1plus"]
+        out["edge_open_1plus"] = (
+            out[model_col] - out["implied_prob_open_1plus"]
+        )
+        out["edge_close_1plus"] = (
+            out[model_col] - out["implied_prob_close_1plus"]
+        )
     else:
         out["edge_open_1plus"] = np.nan
         out["edge_close_1plus"] = np.nan
 
+    # CLV in probability space
     out["clv_prob_1plus"] = (
-        out["implied_prob_close_1plus"] - out["implied_prob_open_1plus"]
+        out["implied_prob_close_1plus"]
+        - out["implied_prob_open_1plus"]
     )
 
     out["clv_pct_1plus"] = (
-        out["implied_prob_close_1plus"] / out["implied_prob_open_1plus"]
-    ) - 1.0
+        out["implied_prob_close_1plus"]
+        / out["implied_prob_open_1plus"]
+        - 1.0
+    )
 
-    return out
+    # remove internal keys from final output
+    return out.drop(columns=["_name_key", "_fb_key"], errors="ignore")
