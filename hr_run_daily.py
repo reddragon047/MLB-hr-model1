@@ -73,6 +73,53 @@ def sim_hr_probs(p_pa: float, exp_pa: float, n_sims: int, seed: int = 42):
     return p1, p2
 
 
+def get_json(url: str, timeout: int = 25):
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (HRBoard)"})
+    r.raise_for_status()
+    return r.json()
+
+
+def bullpen_adjustment_multiplier(bullpen_factor: float, w_bp: float = DEFAULT_W_BP) -> float:
+    """
+    Sniper-safe bullpen blend:
+      mult = 1 + w_bp*(bullpen_factor - 1)
+
+    bullpen_factor: team bullpen HR/PA factor vs league (e.g., 1.08 = +8% HR allowed)
+    w_bp: expected share of hitter PAs vs bullpen (0.25–0.55 typical)
+    """
+    w_bp = clamp(float(w_bp), W_BP_MIN, W_BP_MAX)
+    bullpen_factor = clamp(float(bullpen_factor), BP_MIN, BP_MAX)
+    return 1.0 + w_bp * (bullpen_factor - 1.0)
+
+
+# -------------------------
+# Player name cache
+# -------------------------
+PLAYER_NAME_CACHE: dict[int, str] = {}
+
+
+def get_player_name(player_id: int) -> str:
+    """
+    Resolve MLBAM player_id -> full name via statsapi 'person' endpoint.
+    Cached per run to avoid spamming.
+    """
+    if player_id in PLAYER_NAME_CACHE:
+        return PLAYER_NAME_CACHE[player_id]
+
+    name = str(player_id)
+    try:
+        j = statsapi.get("person", {"personId": player_id})
+        people = j.get("people", [])
+        if people and isinstance(people[0], dict):
+            nm = people[0].get("fullName")
+            if nm:
+                name = nm
+    except Exception:
+        pass
+
+    PLAYER_NAME_CACHE[player_id] = name
+    return name
+
 
 # -------------------------
 # Odds + Edge Helpers
@@ -139,9 +186,23 @@ def american_to_implied_prob(odds) -> float:
     return a / (a + 100.0)
 
 def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
-    """Legacy odds+edge helper (kept for backward compatibility).
-    Your current workflow uses inputs/market_clv.attach_clv(board) instead.
+    """Option 1 (CLV infrastructure):
+    - Supports odds at open + close, computes implied probs, edges, and CLV columns.
+    - Backwards compatible with the old single-file odds_input.csv.
+
+    Expected files (preferred):
+      inputs/odds_open.csv   and/or   inputs/odds_close.csv
+      (also supported at repo root: odds_open.csv / odds_close.csv)
+
+    Back-compat file:
+      inputs/odds_input.csv  (or odds_input.csv at repo root)
+
+    CSV formats:
+      player_name,odds_1plus
+      Mike Trout,+320
+      Byron Buxton,+410
     """
+
     # --- helpers ---
     def read_odds_file(fp: str):
         if not os.path.exists(fp):
@@ -149,6 +210,7 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
         df = pd.read_csv(fp)
         if df.empty:
             return None
+        # allow a couple common column name variants
         col_name = None
         for c in df.columns:
             if c.strip().lower() in ("player_name", "name", "player"):
@@ -169,12 +231,14 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
         out = out.dropna(subset=["name_key"]).drop_duplicates(subset=["name_key"], keep="first")
         return out
 
-    def american_to_implied_prob_local(odds) -> float:
+    # American odds -> implied prob (no vig)
+    def american_to_implied_prob(odds) -> float:
         if pd.isna(odds):
             return float("nan")
         s = str(odds).strip()
         if not s:
             return float("nan")
+        # handle strings like +320, -150, 320
         try:
             v = float(s.replace("+", ""))
         except Exception:
@@ -191,13 +255,16 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
 
     board["name_key"] = board["player_name"].map(normalize_player_name)
 
+    # --- load odds files (open/close preferred) ---
     open_df = read_odds_file("inputs/odds_open.csv") or read_odds_file("odds_open.csv")
     close_df = read_odds_file("inputs/odds_close.csv") or read_odds_file("odds_close.csv")
 
+    # fallback: single odds file (treated as "open")
     if open_df is None and close_df is None:
         open_df = read_odds_file("inputs/odds_input.csv") or read_odds_file("odds_input.csv")
 
     if open_df is None and close_df is None:
+        # nothing to merge
         return board.drop(columns=["name_key"], errors="ignore")
 
     merged = board.copy()
@@ -220,12 +287,14 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
     else:
         merged["odds_close_1plus"] = float("nan")
 
+    # if we only had the old file, keep a friendly alias too
     if "odds_open_1plus" in merged.columns and "odds_1plus" not in merged.columns:
         merged["odds_1plus"] = merged["odds_open_1plus"]
 
-    merged["implied_prob_open_1plus"] = merged["odds_open_1plus"].map(american_to_implied_prob_local)
-    merged["implied_prob_close_1plus"] = merged["odds_close_1plus"].map(american_to_implied_prob_local)
+    merged["implied_prob_open_1plus"] = merged["odds_open_1plus"].map(american_to_implied_prob)
+    merged["implied_prob_close_1plus"] = merged["odds_close_1plus"].map(american_to_implied_prob)
 
+    # model prob column (this is what we compare against the market)
     model_col = "p_hr_1plus_sim" if "p_hr_1plus_sim" in merged.columns else ("p_hr_1plus" if "p_hr_1plus" in merged.columns else None)
 
     if model_col is not None:
@@ -235,13 +304,17 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
         merged["edge_open_1plus"] = float("nan")
         merged["edge_close_1plus"] = float("nan")
 
+    # CLV (probability space): positive = the market moved toward your side (close implied prob > open implied prob)
     merged["clv_prob_1plus"] = merged["implied_prob_close_1plus"] - merged["implied_prob_open_1plus"]
     merged["clv_pct_1plus"] = (merged["implied_prob_close_1plus"] / merged["implied_prob_open_1plus"]) - 1.0
 
+    # Keep your existing one-file columns for compatibility with your current board layout
+    # (these show up when only open is present)
     merged["odds_1plus"] = merged.get("odds_1plus", merged.get("odds_open_1plus"))
     merged["implied_prob_1plus"] = merged.get("implied_prob_1plus", merged.get("implied_prob_open_1plus"))
     merged["edge_1plus"] = merged.get("edge_1plus", merged.get("edge_open_1plus"))
 
+    # Sort preference: by edge_open if available, else edge_1plus, else leave as-is
     sort_col = "edge_open_1plus" if merged["edge_open_1plus"].notna().any() else ("edge_1plus" if "edge_1plus" in merged.columns else None)
     if sort_col is not None:
         merged = merged.sort_values(by=sort_col, ascending=False, na_position="last")
@@ -249,57 +322,18 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
     return merged.drop(columns=["name_key"], errors="ignore")
 
 
-def get_json(url: str, timeout: int = 25):
-    r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (HRBoard)"})
-    r.raise_for_status()
-    return r.json()
-
-
-def bullpen_adjustment_multiplier(bullpen_factor: float, w_bp: float = DEFAULT_W_BP) -> float:
-    """
-    Sniper-safe bullpen blend:
-      mult = 1 + w_bp*(bullpen_factor - 1)
-    """
-    w_bp = clamp(float(w_bp), W_BP_MIN, W_BP_MAX)
-    bullpen_factor = clamp(float(bullpen_factor), BP_MIN, BP_MAX)
-    return 1.0 + w_bp * (bullpen_factor - 1.0)
-
-
-# -------------------------
-# Player name cache
-# -------------------------
-PLAYER_NAME_CACHE: dict[int, str] = {}
-
-
-def get_player_name(player_id: int) -> str:
-    """
-    Resolve MLBAM player_id -> full name via statsapi 'person' endpoint.
-    Cached per run to avoid spamming.
-    """
-    if player_id in PLAYER_NAME_CACHE:
-        return PLAYER_NAME_CACHE[player_id]
-
-    name = str(player_id)
-    try:
-        j = statsapi.get("person", {"personId": player_id})
-        people = j.get("people", [])
-        if people and isinstance(people[0], dict):
-            nm = people[0].get("fullName")
-            if nm:
-                name = nm
-    except Exception:
-        pass
-
-    PLAYER_NAME_CACHE[player_id] = name
-    return name
-
-
 # -------------------------
 # Statcast Pull + Feature Building
 # -------------------------
-def pull_statcast_season(season: int) -> pd.DataFrame:
+def pull_statcast_season(season: int, end_dt: str | None = None) -> pd.DataFrame:
+    """Pull Statcast for a season.
+
+    If end_dt is provided (YYYY-MM-DD), pulls through that date. This is used for
+    *current-season live refresh* so the model captures yesterday's games when you
+    run it this morning.
+    """
     start = f"{season}-03-01"
-    end = f"{season}-11-15"
+    end = end_dt if end_dt else f"{season}-11-15"
     return statcast(start_dt=start, end_dt=end)
 
 
@@ -308,6 +342,11 @@ def batter_pitcher_tables(stat_df: pd.DataFrame, season: int) -> tuple[pd.DataFr
     df["season"] = season
 
     pa = df[df["events"].notna()].copy()
+
+    # Statcast can sometimes come in with mixed dtypes; force numeric here
+    # so downstream aggregates (avg_ev/avg_la) stay float and XGBoost never sees objects.
+    pa["launch_speed"] = pd.to_numeric(pa.get("launch_speed"), errors="coerce")
+    pa["launch_angle"] = pd.to_numeric(pa.get("launch_angle"), errors="coerce")
 
     pa["is_hr"] = (pa["events"] == "home_run").astype(int)
     pa["is_k"] = (pa["events"] == "strikeout").astype(int)
@@ -331,6 +370,12 @@ def batter_pitcher_tables(stat_df: pd.DataFrame, season: int) -> tuple[pd.DataFr
     ).reset_index()
 
     bat = bat_pa.merge(bat_bbe, on=["batter", "season"], how="left").fillna(0)
+
+    # Force model feature cols to real numeric dtypes (XGBoost requirement)
+    for c in ["barrel_rate", "avg_ev", "avg_la", "BBE"]:
+        if c in bat.columns:
+            bat[c] = pd.to_numeric(bat[c], errors="coerce").fillna(0.0).astype(float)
+
     bat["k_rate"] = bat["K"] / bat["PA"].clip(lower=1)
     bat["bb_rate"] = bat["BB"] / bat["PA"].clip(lower=1)
     bat["hr_rate"] = bat["HR"] / bat["PA"].clip(lower=1)
@@ -398,9 +443,12 @@ def build_pitch_mix_and_batter_damage(stat_df: pd.DataFrame) -> tuple[pd.DataFra
 
 
 def compute_park_factors(stat_df: pd.DataFrame, k_barrel: int = 1500, k_fb: int = 2000) -> pd.DataFrame:
+    """Compute park HR conversion multipliers keyed by home_team."""
     df = stat_df.copy()
 
     df = df[df["events"].notna()].copy()
+    df["launch_speed"] = pd.to_numeric(df.get("launch_speed"), errors="coerce")
+    df["launch_angle"] = pd.to_numeric(df.get("launch_angle"), errors="coerce")
     df = df[df["launch_speed"].notna() & df["launch_angle"].notna()].copy()
 
     df["is_hr"] = (df["events"] == "home_run").astype(int)
@@ -517,7 +565,15 @@ def compute_bullpen_factors(stat_all: pd.DataFrame) -> pd.DataFrame:
     return team_bp[["team", "bullpen_factor"]]
 
 
-def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def get_training_cached(
+    train_seasons: list[int],
+    date_str: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load (or build) training tables.
+
+    IMPORTANT: If the *current season* is included in train_seasons, we refresh the Statcast pull
+    every run through `date_str` so you always capture the most up-to-date numbers.
+    """
     key = "_".join(map(str, train_seasons))
     bat_path = f"data/processed/bat_{key}.parquet"
     pit_path = f"data/processed/pit_{key}.parquet"
@@ -526,7 +582,13 @@ def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.Data
     park_path = f"data/processed/park_{key}.parquet"
     bp_path = f"data/processed/bullpen_{key}.parquet"
 
-    if all(os.path.exists(p) for p in [bat_path, pit_path, mix_path, dmg_path, park_path, bp_path]):
+    current_season = date_cls.today().year
+
+    # If current season is in training set, we rebuild each run (no processed cache),
+    # because the underlying data changes daily.
+    can_use_processed_cache = (current_season not in train_seasons)
+
+    if can_use_processed_cache and all(os.path.exists(p) for p in [bat_path, pit_path, mix_path, dmg_path, park_path, bp_path]):
         return (
             pd.read_parquet(bat_path),
             pd.read_parquet(pit_path),
@@ -540,25 +602,14 @@ def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.Data
     bat_tables = []
     pit_tables = []
 
-    # Always refresh the *current season* Statcast pull so each run captures yesterday's games.
-    # Prior seasons stay cached for speed/stability.
-    current_season = int(date_cls.today().year)
-
     for s in train_seasons:
-        raw_path = f"data/raw/statcast_{s}.parquet"
-        refresh = (int(s) == current_season)
-
-        if refresh:
-            try:
-                season_df = pull_statcast_season(s)
-                season_df.to_parquet(raw_path, index=False)
-            except Exception:
-                # If refresh pull fails (bad internet/API), fall back to cached file if it exists.
-                if os.path.exists(raw_path):
-                    season_df = pd.read_parquet(raw_path)
-                else:
-                    raise
+        if s == current_season:
+            # LIVE refresh each run
+            raw_path = f"data/raw/statcast_{s}_live.parquet"
+            season_df = pull_statcast_season(s, end_dt=date_str)
+            season_df.to_parquet(raw_path, index=False)
         else:
+            raw_path = f"data/raw/statcast_{s}.parquet"
             if os.path.exists(raw_path):
                 season_df = pd.read_parquet(raw_path)
             else:
@@ -578,12 +629,14 @@ def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.Data
     park = compute_park_factors(stat_all)
     bullpen = compute_bullpen_factors(stat_all)
 
-    bat_all.to_parquet(bat_path, index=False)
-    pit_all.to_parquet(pit_path, index=False)
-    mix_p.to_parquet(mix_path, index=False)
-    dmg_b.to_parquet(dmg_path, index=False)
-    park.to_parquet(park_path, index=False)
-    bullpen.to_parquet(bp_path, index=False)
+    # Only persist processed cache for stable (all-historical) sets
+    if can_use_processed_cache:
+        bat_all.to_parquet(bat_path, index=False)
+        pit_all.to_parquet(pit_path, index=False)
+        mix_p.to_parquet(mix_path, index=False)
+        dmg_b.to_parquet(dmg_path, index=False)
+        park.to_parquet(park_path, index=False)
+        bullpen.to_parquet(bp_path, index=False)
 
     return bat_all, pit_all, mix_p, dmg_b, park, bullpen
 
@@ -612,7 +665,7 @@ def train_or_load_hr_model(bat_df: pd.DataFrame, train_seasons: list[int]):
         axis=1
     )
 
-    X = df[FEATURE_COLS].fillna(0.0)
+    X = df[FEATURE_COLS].apply(lambda s: pd.to_numeric(s, errors="coerce")).fillna(0.0).astype(float)
     y = df["hr_rate_shrunk"].astype(float)
 
     X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -747,7 +800,7 @@ def temp_multiplier(temp_f: float | None) -> float:
 # Build Board
 # -------------------------
 def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weather: bool):
-    bat_df, pit_df, mix_df, dmg_df, park_df, bullpen_df = get_training_cached(train_seasons)
+    bat_df, pit_df, mix_df, dmg_df, park_df, bullpen_df = get_training_cached(train_seasons, date_str)
     model, calib, meta = train_or_load_hr_model(bat_df, train_seasons)
 
     bat_latest = bat_df.sort_values("season").groupby("batter").tail(1).set_index("batter")
@@ -805,7 +858,8 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
                 player_name = get_player_name(int(hid))
 
-                feat = bat_latest.loc[hid, FEATURE_COLS].to_frame().T.fillna(0.0)
+                feat = bat_latest.loc[hid, FEATURE_COLS].to_frame().T
+                feat = feat.apply(lambda s: pd.to_numeric(s, errors="coerce")).fillna(0.0).astype(float)
 
                 p_raw = float(model.predict(feat)[0])
                 p_pa = float(calib.predict([np.clip(p_raw, 1e-6, 0.5)])[0])
@@ -910,11 +964,10 @@ def main():
     ensure_dirs()
 
     train_seasons = [int(x.strip()) for x in args.seasons.split(",") if x.strip()]
-
-    # Ensure the current season is included so each run can refresh with the latest games.
-    current_season = int(date_cls.today().year)
+    current_season = date_cls.today().year
     if current_season not in train_seasons:
-        train_seasons = sorted(train_seasons + [current_season])
+        train_seasons.append(current_season)
+    train_seasons = sorted(set(train_seasons))
 
     board = build_board(args.date, n_sims=args.sims, train_seasons=train_seasons, use_weather=args.weather)
 
