@@ -70,6 +70,146 @@ def sim_hr_probs(p_pa: float, exp_pa: float, n_sims: int, seed: int = 42):
     return p1, p2
 
 
+
+# -------------------------
+# Odds + Edge Helpers
+# -------------------------
+
+_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+def normalize_player_name(x: str) -> str:
+    """Loose, safe normalization for player_name matching."""
+    if x is None:
+        return ""
+    s = str(x).strip().lower()
+
+    # Strip accents (e.g. JosÃ© -> Jose)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+
+    # Normalize apostrophes and remove punctuation (keep comma for "last, first")
+    s = s.replace("â", "'")
+    s = re.sub(r"[.\-']", "", s)
+
+    # Flip "last, first" -> "first last"
+    if "," in s:
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        if len(parts) >= 2:
+            s = f"{parts[1]} {parts[0]}"
+
+    tokens = [t for t in re.split(r"\s+", s) if t]
+    tokens = [t for t in tokens if t not in _SUFFIXES]
+
+    s = " ".join(tokens)
+    s = re.sub(r"[^a-z\s]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def name_fallback_key(norm: str) -> str:
+    """Fallback key: last name + first initial."""
+    parts = norm.split()
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        return f"{last}_{first[0]}"
+    return norm
+
+def american_to_implied_prob(odds) -> float:
+    """Convert American odds (+320 / -120) to implied probability."""
+    if odds is None or (isinstance(odds, float) and np.isnan(odds)):
+        return np.nan
+    if isinstance(odds, str):
+        s = odds.strip().replace(" ", "")
+        if s == "":
+            return np.nan
+        try:
+            odds = int(s)
+        except Exception:
+            return np.nan
+    try:
+        odds = float(odds)
+    except Exception:
+        return np.nan
+
+    if odds > 0:
+        return 100.0 / (odds + 100.0)
+    a = abs(odds)
+    return a / (a + 100.0)
+
+def add_market_edge(board: pd.DataFrame, odds_paths=None) -> pd.DataFrame:
+    """
+    Merge user-provided 1+ HR odds and compute implied probability + edge.
+
+    Expected CSV columns:
+      - player_name
+      - odds_1plus (American odds, e.g. +320 or -120)
+
+    Looks for odds_input.csv in common locations. If not found, returns board unchanged.
+    """
+    if odds_paths is None:
+        odds_paths = ["inputs/odds_input.csv", "odds_input.csv"]
+
+    odds_path = None
+    for p in odds_paths:
+        if os.path.exists(p):
+            odds_path = p
+            break
+    if odds_path is None:
+        return board
+
+    try:
+        odds_df = pd.read_csv(odds_path)
+    except Exception as e:
+        print(f"Could not read odds file {odds_path}: {e}")
+        return board
+
+    if "player_name" not in odds_df.columns or "odds_1plus" not in odds_df.columns:
+        print(f"Odds file {odds_path} must have columns: player_name, odds_1plus")
+        return board
+
+    out = board.copy()
+    odds_df = odds_df.copy()
+
+    out["_name_key"] = out["player_name"].apply(normalize_player_name)
+    odds_df["_name_key"] = odds_df["player_name"].apply(normalize_player_name)
+
+    out["_fallback_key"] = out["_name_key"].apply(name_fallback_key)
+    odds_df["_fallback_key"] = odds_df["_name_key"].apply(name_fallback_key)
+
+    # Primary merge on normalized full name
+    merged = out.merge(
+        odds_df[["_name_key", "_fallback_key", "odds_1plus"]],
+        on="_name_key",
+        how="left",
+        suffixes=("", "_odds")
+    )
+
+    # Fallback merge (last + first initial) for remaining missing odds
+    missing = merged["odds_1plus"].isna()
+    if missing.any():
+        odds_fb = odds_df[["_fallback_key", "odds_1plus"]].drop_duplicates("_fallback_key")
+        fb = merged.loc[missing, ["_fallback_key"]].merge(odds_fb, on="_fallback_key", how="left")
+        merged.loc[missing, "odds_1plus"] = fb["odds_1plus"].values
+
+    # Compute implied and edge
+    merged["implied_prob_1plus"] = merged["odds_1plus"].apply(american_to_implied_prob)
+
+    if "p_hr_1plus_sim" in merged.columns:
+        merged["edge_1plus"] = merged["p_hr_1plus_sim"] - merged["implied_prob_1plus"]
+        merged["edge_1plus_pct"] = merged["edge_1plus"] * 100.0
+
+        # If any odds present, rank by edge descending (unmatched go last)
+        if merged["odds_1plus"].notna().any():
+            merged = merged.sort_values(["edge_1plus"], ascending=False, na_position="last").reset_index(drop=True)
+
+    # Log unmatched odds names (helps fix typos)
+    unmatched = odds_df[~odds_df["_name_key"].isin(set(out["_name_key"]))]
+    if len(unmatched) > 0:
+        sample = unmatched["player_name"].astype(str).head(25).tolist()
+        print(f"Unmatched odds names (first 25): {sample}")
+
+    merged.drop(columns=["_name_key", "_fallback_key"], inplace=True, errors="ignore")
+    return merged
+
 def get_json(url: str, timeout: int = 25):
     r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (HRBoard)"})
     r.raise_for_status()
@@ -82,7 +222,7 @@ def bullpen_adjustment_multiplier(bullpen_factor: float, w_bp: float = DEFAULT_W
       mult = 1 + w_bp*(bullpen_factor - 1)
 
     bullpen_factor: team bullpen HR/PA factor vs league (e.g., 1.08 = +8% HR allowed)
-    w_bp: expected share of hitter PAs vs bullpen (0.25–0.55 typical)
+    w_bp: expected share of hitter PAs vs bullpen (0.25â0.55 typical)
     """
     w_bp = clamp(float(w_bp), W_BP_MIN, W_BP_MAX)
     bullpen_factor = clamp(float(bullpen_factor), BP_MIN, BP_MAX)
@@ -659,7 +799,7 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
                 env_mult = float(np.clip(park_contact_mult * w_mult, 0.80, 1.30))
 
-                # ✅ Apply bullpen multiplier here (sniper-safe)
+                # â Apply bullpen multiplier here (sniper-safe)
                 p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult, 1e-6, 0.30))
 
                 pa_last = float(bat_latest.loc[hid, "PA"])
@@ -719,7 +859,7 @@ def write_outputs(board: pd.DataFrame, date_str: str, top_n: int):
       </style>
     </head>
     <body>
-      <h2>HR Probability Board — {date_str} (Top {top_n})</h2>
+      <h2>HR Probability Board â {date_str} (Top {top_n})</h2>
       <p>p_hr_1plus_sim / p_hr_2plus_sim / p_hr_pa are percentages.</p>
       {show.to_html(index=False, escape=True)}
     </body>
@@ -747,6 +887,9 @@ def main():
         pd.DataFrame([{"message": f"No board produced for {args.date}"}]).to_csv(f"outputs/NO_DATA_{args.date}.csv", index=False)
         print("No board produced.")
         return
+
+    # Merge market odds + edge if inputs/odds_input.csv (or odds_input.csv) exists
+    board = add_market_edge(board)
 
     write_outputs(board, args.date, top_n=args.top)
     print("\nTop 25 (by P(HR>=1) sim):")
