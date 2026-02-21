@@ -6,6 +6,7 @@ from datetime import date as date_cls
 import numpy as np
 import pandas as pd
 import requests
+import unicodedata
 
 from pybaseball import statcast
 import statsapi
