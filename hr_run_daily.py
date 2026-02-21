@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import requests
 import unicodedata
+import re
 
 from pybaseball import statcast
 import statsapi
