@@ -212,9 +212,10 @@ def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
     close_df = read_odds_file("inputs/odds_close.csv") or read_odds_file("odds_close.csv")
 
     # fallback: single odds file (treated as "open")
-    if open_df is None and close_df is None:
-        open_df = read_odds_file("inputs/odds_input.csv") or read_odds_file("odds_input.csv")
-
+if (open_df is None or open_df.empty) and (close_df is None or close_df.empty):
+    open_df = read_odds_file("inputs/odds_input.csv")
+    if open_df is None or open_df.empty:
+        open_df = read_odds_file("odds_input.csv")
     if open_df is None and close_df is None:
         # nothing to merge
         return board.drop(columns=["name_key"], errors="ignore")
