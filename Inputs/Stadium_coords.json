@@ -1,0 +1,94 @@
+{
+  "Arizona Diamondbacks": {"lat": 33.445001, "lon": -112.066707},
+  "Chase Field": {"lat": 33.445001, "lon": -112.066707},
+
+  "Atlanta Braves": {"lat": 33.891127, "lon": -84.467987},
+  "Truist Park": {"lat": 33.891127, "lon": -84.467987},
+  "SunTrust Park": {"lat": 33.891127, "lon": -84.467987},
+
+  "Baltimore Orioles": {"lat": 39.283514, "lon": -76.621913},
+  "Oriole Park at Camden Yards": {"lat": 39.283514, "lon": -76.621913},
+
+  "Boston Red Sox": {"lat": 42.346247, "lon": -71.097765},
+  "Fenway Park": {"lat": 42.346247, "lon": -71.097765},
+
+  "Chicago Cubs": {"lat": 41.947929, "lon": -87.655810},
+  "Wrigley Field": {"lat": 41.947929, "lon": -87.655810},
+
+  "Chicago White Sox": {"lat": 41.830187, "lon": -87.634224},
+  "Guaranteed Rate Field": {"lat": 41.830187, "lon": -87.634224},
+
+  "Cincinnati Reds": {"lat": 39.097474, "lon": -84.507036},
+  "Great American Ball Park": {"lat": 39.097474, "lon": -84.507036},
+
+  "Cleveland Guardians": {"lat": 41.495545, "lon": -81.685285},
+  "Progressive Field": {"lat": 41.495545, "lon": -81.685285},
+
+  "Colorado Rockies": {"lat": 39.755719, "lon": -104.994199},
+  "Coors Field": {"lat": 39.755719, "lon": -104.994199},
+
+  "Detroit Tigers": {"lat": 42.339451, "lon": -83.048970},
+  "Comerica Park": {"lat": 42.339451, "lon": -83.048970},
+
+  "Houston Astros": {"lat": 29.757056, "lon": -95.355411},
+  "Minute Maid Park": {"lat": 29.757056, "lon": -95.355411},
+
+  "Kansas City Royals": {"lat": 39.051246, "lon": -94.480809},
+  "Kauffman Stadium": {"lat": 39.051246, "lon": -94.480809},
+
+  "Los Angeles Angels": {"lat": 33.799922, "lon": -117.883171},
+  "Angel Stadium": {"lat": 33.799922, "lon": -117.883171},
+
+  "Los Angeles Dodgers": {"lat": 34.073421, "lon": -118.240228},
+  "Dodger Stadium": {"lat": 34.073421, "lon": -118.240228},
+
+  "Miami Marlins": {"lat": 25.778324, "lon": -80.219845},
+  "loanDepot park": {"lat": 25.778324, "lon": -80.219845},
+  "Marlins Park": {"lat": 25.778324, "lon": -80.219845},
+
+  "Milwaukee Brewers": {"lat": 43.028436, "lon": -87.971642},
+  "American Family Field": {"lat": 43.028436, "lon": -87.971642},
+  "Miller Park": {"lat": 43.028436, "lon": -87.971642},
+
+  "Minnesota Twins": {"lat": 44.981717, "lon": -93.278279},
+  "Target Field": {"lat": 44.981717, "lon": -93.278279},
+
+  "New York Mets": {"lat": 40.756587, "lon": -73.846030},
+  "Citi Field": {"lat": 40.756587, "lon": -73.846030},
+
+  "New York Yankees": {"lat": 40.829489, "lon": -73.926949},
+  "Yankee Stadium": {"lat": 40.829489, "lon": -73.926949},
+
+  "Philadelphia Phillies": {"lat": 39.905584, "lon": -75.166592},
+  "Citizens Bank Park": {"lat": 39.905584, "lon": -75.166592},
+
+  "Pittsburgh Pirates": {"lat": 40.447063, "lon": -80.006180},
+  "PNC Park": {"lat": 40.447063, "lon": -80.006180},
+
+  "San Diego Padres": {"lat": 32.707063, "lon": -117.157074},
+  "Petco Park": {"lat": 32.707063, "lon": -117.157074},
+
+  "San Francisco Giants": {"lat": 37.778369, "lon": -122.389911},
+  "Oracle Park": {"lat": 37.778369, "lon": -122.389911},
+
+  "Seattle Mariners": {"lat": 47.591124, "lon": -122.332907},
+  "T-Mobile Park": {"lat": 47.591124, "lon": -122.332907},
+
+  "St. Louis Cardinals": {"lat": 38.622408, "lon": -90.193387},
+  "Busch Stadium": {"lat": 38.622408, "lon": -90.193387},
+
+  "Tampa Bay Rays": {"lat": 27.768110, "lon": -82.653453},
+  "Tropicana Field": {"lat": 27.768110, "lon": -82.653453},
+
+  "Texas Rangers": {"lat": 32.749700, "lon": -97.081100},
+  "Globe Life Field": {"lat": 32.749700, "lon": -97.081100},
+
+  "Toronto Blue Jays": {"lat": 43.641682, "lon": -79.389181},
+  "Rogers Centre": {"lat": 43.641682, "lon": -79.389181},
+
+  "Washington Nationals": {"lat": 38.872576, "lon": -77.007716},
+  "Nationals Park": {"lat": 38.872576, "lon": -77.007716},
+
+  "Athletics": {"lat": 38.579811, "lon": -121.514752},
+  "Sutter Health Park": {"lat": 38.579811, "lon": -121.514752}
+}
