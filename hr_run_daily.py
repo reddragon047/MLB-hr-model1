@@ -767,12 +767,37 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
                 p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult, 1e-6, 0.30))
 
-                pa_last = float(bat_latest.loc[hid, "PA"])
-                games_proxy = max(pa_last / 4.2, 1.0)
-                exp_pa = float(pa_last / games_proxy)
+                # -------------------------
+# Improved exp_pa logic
+# -------------------------
 
-                exp_pa += (0.05 if not is_home else -0.05)
-                exp_pa = float(np.clip(exp_pa, 3.2, 5.2))
+# Default neutral if lineup unknown
+lineup_slot = None  # placeholder until lineup integration added
+
+LINEUP_BASELINES = {
+    1: 4.65,
+    2: 4.55,
+    3: 4.45,
+    4: 4.35,
+    5: 4.25,
+    6: 4.15,
+    7: 4.05,
+    8: 3.95,
+    9: 3.85,
+}
+
+if lineup_slot in LINEUP_BASELINES:
+    exp_pa = LINEUP_BASELINES[lineup_slot]
+else:
+    pa_last = float(bat_latest.loc[hid, "PA"])
+    games_proxy = max(pa_last / 4.2, 1.0)
+    exp_pa = float(pa_last / games_proxy)
+
+# Home team slight reduction (no guaranteed 9th inning)
+if is_home:
+    exp_pa -= 0.08
+
+exp_pa = float(np.clip(exp_pa, 3.3, 5.3))
 
                 p1, p2 = sim_hr_probs(p_pa_adj, exp_pa, n_sims=n_sims)
 
