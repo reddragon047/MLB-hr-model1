@@ -659,7 +659,7 @@ def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.Data
     bullpen.to_parquet(bp_path, index=False)
 # ---- platoon cache ----
 # Build batter/pitcher handedness & platoon splits once per training cache
-    platoon_df = platoon.build_platoon_splits(stat_all)  # <-- from your platoon module
+    platoon_df = platoon.compute_batter_platoon_splits(stat_all)  # <-- from your platoon module
     platoon_df.to_parquet(platoon_path, index=False)
     return bat_all, pit_all, mix_p, dmg_b, park, bullpen, platoon_df
 
