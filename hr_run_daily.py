@@ -336,7 +336,48 @@ def bullpen_adjustment_multiplier(bullpen_factor: float, w_bp: float = DEFAULT_W
 # Player name cache
 # -------------------------
 PLAYER_NAME_CACHE: dict[int, str] = {}
+# -------------------------
+# Handedness cache
+# -------------------------
+PLAYER_HAND_CACHE: dict[int, tuple[str, str]] = {}
 
+
+def get_bat_throw(player_id: int) -> tuple[str, str]:
+    """
+    Returns (bat_side, pitch_hand) codes.
+    bat_side: 'L', 'R', 'S' (switch)
+    pitch_hand: 'L', 'R'
+    Uses statsapi 'person' endpoint and caches results per run.
+    """
+    if player_id in PLAYER_HAND_CACHE:
+        return PLAYER_HAND_CACHE[player_id]
+
+    bat_side = "R"
+    pitch_hand = "R"
+
+    try:
+        j = statsapi.get("person", {"personId": int(player_id)})
+        people = j.get("people", [])
+        if people and isinstance(people[0], dict):
+            p = people[0]
+
+            bs = p.get("batSide") or {}
+            ph = p.get("pitchHand") or {}
+
+            if isinstance(bs, dict):
+                bat_side = (bs.get("code") or bat_side).upper()
+            if isinstance(ph, dict):
+                pitch_hand = (ph.get("code") or pitch_hand).upper()
+
+            if bat_side not in ("L", "R", "S"):
+                bat_side = "R"
+            if pitch_hand not in ("L", "R"):
+                pitch_hand = "R"
+    except Exception:
+        pass
+
+    PLAYER_HAND_CACHE[player_id] = (bat_side, pitch_hand)
+    return bat_side, pitch_hand
 
 def get_player_name(player_id: int) -> str:
     """
