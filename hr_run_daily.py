@@ -1193,7 +1193,7 @@ if pitch_hand in ("R", "L"):
         if np.isfinite(overall) and overall > 0 and np.isfinite(split) and split > 0:
             platoon_mult = split / overall
             platoon_mult = float(np.clip(platoon_mult, 0.80, 1.25))
-                # ✅ Apply bullpen multiplier here (sniper-safe)
+            # ✅ Apply bullpen multiplier here (sniper-safe)
                 p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, 0.30))
 
                 # exp_pa (expected plate appearances)
