@@ -1183,7 +1183,7 @@ pitch_hand = (pitch_hand or "").upper()[:1]
 platoon_mult = 1.0
 if pitch_hand in ("R", "L"):
     pinfo = platoon_map.get(int(hid))
-    if pinfo:
+        if pinfo:
         overall = float(pinfo.get("hr_pa_overall_shrunk", np.nan))
         if pitch_hand == "R":
             split = float(pinfo.get("hr_pa_vs_R_shrunk", np.nan))
@@ -1193,8 +1193,8 @@ if pitch_hand in ("R", "L"):
         if np.isfinite(overall) and overall > 0 and np.isfinite(split) and split > 0:
             platoon_mult = split / overall
             platoon_mult = float(np.clip(platoon_mult, 0.80, 1.25))
-            # ✅ Apply bullpen multiplier here (sniper-safe)
-                p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, 0.30))
+ # ✅ Apply bullpen multiplier here (sniper-safe)
+p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, 0.30))
 
                 # exp_pa (expected plate appearances)
                 # Uses confirmed lineup if available; otherwise estimates slot from recent games + season PA/G.
