@@ -16,8 +16,8 @@ import statsapi
 from xgboost import XGBRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.isotonic import IsotonicRegression
-
 from inputs import market_clv
+
 
 # -------------------------
 # CONFIG
@@ -25,6 +25,8 @@ from inputs import market_clv
 TRAIN_SEASONS_DEFAULT = [2023, 2024, 2025]
 DEFAULT_SIMS = 100000
 DEFAULT_TOPN = 75
+
+PA_DISPERSION_K_DEFAULT = 8.0  # Negative Binomial dispersion for PA sims (higher = less variance)
 
 FEATURE_COLS = [
     "barrel_rate",
@@ -42,6 +44,7 @@ DEFAULT_W_BP = 0.40                 # expected share of hitter PAs vs bullpen
 W_BP_MIN, W_BP_MAX = 0.25, 0.55     # clamp w_bp
 BP_MIN, BP_MAX = 0.85, 1.15         # clamp bullpen factor
 BULLPEN_PRIOR_STRENGTH = 3000       # shrinkage strength (higher = more stable)
+
 
 # -------------------------
 # Utils
@@ -64,15 +67,252 @@ def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
-def sim_hr_probs(p_pa: float, exp_pa: float, n_sims: int, seed: int = 42):
+def sim_hr_probs(
+    p_pa: float,
+    exp_pa: float,
+    n_sims: int,
+    seed: int = 42,
+    pa_k: float | None = None,
+):
+    """
+    Monte Carlo for P(HR>=1) / P(HR>=2) given:
+
+      p_pa   = per-PA HR probability
+      exp_pa = expected plate appearances
+
+    PA variance model:
+      - Default: Negative Binomial via Gamma-Poisson mixture (over-dispersed vs Poisson).
+      - Fallback: Poisson if pa_k is None or <= 0.
+
+    pa_k is a dispersion parameter:
+      var(PA) = mu + mu^2 / k
+      Larger k -> closer to Poisson; smaller k -> fatter tails.
+
+    This improves realism (lineup spot / game context causes extra variance) while
+    keeping the mean fixed at exp_pa.
+    """
     rng = np.random.default_rng(seed)
-    pa = rng.poisson(lam=max(exp_pa, 0.05), size=n_sims)
-    hr = rng.binomial(n=pa, p=float(np.clip(p_pa, 0.0, 1.0)))
+
+    mu = float(max(exp_pa, 0.05))
+    p = float(np.clip(p_pa, 0.0, 1.0))
+
+    # Use a global default if present, otherwise a sane default.
+    k_default = globals().get("PA_DISPERSION_K_DEFAULT", 8.0)
+    k = k_default if pa_k is None else float(pa_k)
+
+    if k is not None and k > 0:
+        # Gamma-Poisson mixture => Negative Binomial with mean mu and dispersion k
+        lam = rng.gamma(shape=k, scale=(mu / k), size=n_sims)
+        pa = rng.poisson(lam=lam)
+    else:
+        pa = rng.poisson(lam=mu, size=n_sims)
+
+    hr = rng.binomial(n=pa, p=p)
     p1 = float((hr >= 1).mean())
     p2 = float((hr >= 2).mean())
     return p1, p2
 
 
+
+# -------------------------
+# Odds + Edge Helpers
+# -------------------------
+
+_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+def normalize_player_name(x: str) -> str:
+    """Loose, safe normalization for player_name matching."""
+    if x is None:
+        return ""
+    s = str(x).strip().lower()
+
+    # Strip accents (e.g. José -> Jose)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+
+    # Normalize apostrophes and remove punctuation (keep comma for "last, first")
+    s = s.replace("’", "'")
+    s = re.sub(r"[.\-']", "", s)
+
+    # Flip "last, first" -> "first last"
+    if "," in s:
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        if len(parts) >= 2:
+            s = f"{parts[1]} {parts[0]}"
+
+    tokens = [t for t in re.split(r"\s+", s) if t]
+    tokens = [t for t in tokens if t not in _SUFFIXES]
+
+    s = " ".join(tokens)
+    s = re.sub(r"[^a-z\s]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def name_fallback_key(norm: str) -> str:
+    """Fallback key: last name + first initial."""
+    parts = norm.split()
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        return f"{last}_{first[0]}"
+    return norm
+
+def american_to_implied_prob(odds) -> float:
+    """Convert American odds (+320 / -120) to implied probability."""
+    if odds is None or (isinstance(odds, float) and np.isnan(odds)):
+        return np.nan
+    if isinstance(odds, str):
+        s = odds.strip().replace(" ", "")
+        if s == "":
+            return np.nan
+        try:
+            odds = int(s)
+        except Exception:
+            return np.nan
+    try:
+        odds = float(odds)
+    except Exception:
+        return np.nan
+
+    if odds > 0:
+        return 100.0 / (odds + 100.0)
+    a = abs(odds)
+    return a / (a + 100.0)
+
+def add_market_edge(board: pd.DataFrame) -> pd.DataFrame:
+    """Option 1 (CLV infrastructure):
+    - Supports odds at open + close, computes implied probs, edges, and CLV columns.
+    - Backwards compatible with the old single-file odds_input.csv.
+
+    Expected files (preferred):
+      inputs/odds_open.csv   and/or   inputs/odds_close.csv
+      (also supported at repo root: odds_open.csv / odds_close.csv)
+
+    Back-compat file:
+      inputs/odds_input.csv  (or odds_input.csv at repo root)
+
+    CSV formats:
+      player_name,odds_1plus
+      Mike Trout,+320
+      Byron Buxton,+410
+    """
+
+    # --- helpers ---
+    def read_odds_file(fp: str):
+        if not os.path.exists(fp):
+            return None
+        df = pd.read_csv(fp)
+        if df.empty:
+            return None
+        # allow a couple common column name variants
+        col_name = None
+        for c in df.columns:
+            if c.strip().lower() in ("player_name", "name", "player"):
+                col_name = c
+                break
+        if col_name is None:
+            raise ValueError(f"{fp}: missing 'player_name' column")
+        col_odds = None
+        for c in df.columns:
+            if c.strip().lower() in ("odds_1plus", "odds", "odds1plus", "hr_odds", "odds_hr"):
+                col_odds = c
+                break
+        if col_odds is None:
+            raise ValueError(f"{fp}: missing 'odds_1plus' column")
+        out = df[[col_name, col_odds]].copy()
+        out.columns = ["player_name", "odds_1plus"]
+        out["name_key"] = out["player_name"].map(normalize_player_name)
+        out = out.dropna(subset=["name_key"]).drop_duplicates(subset=["name_key"], keep="first")
+        return out
+
+    # American odds -> implied prob (no vig)
+    def american_to_implied_prob(odds) -> float:
+        if pd.isna(odds):
+            return float("nan")
+        s = str(odds).strip()
+        if not s:
+            return float("nan")
+        # handle strings like +320, -150, 320
+        try:
+            v = float(s.replace("+", ""))
+        except Exception:
+            return float("nan")
+        if v == 0:
+            return float("nan")
+        if v > 0:
+            return 100.0 / (v + 100.0)
+        return (-v) / ((-v) + 100.0)
+
+    board = board.copy()
+    if "player_name" not in board.columns:
+        return board
+
+    board["name_key"] = board["player_name"].map(normalize_player_name)
+
+    # --- load odds files (open/close preferred) ---
+    open_df = read_odds_file("inputs/odds_open.csv") or read_odds_file("odds_open.csv")
+    close_df = read_odds_file("inputs/odds_close.csv") or read_odds_file("odds_close.csv")
+
+    # fallback: single odds file (treated as "open")
+    if open_df is None and close_df is None:
+        open_df = read_odds_file("inputs/odds_input.csv") or read_odds_file("odds_input.csv")
+
+    if open_df is None and close_df is None:
+        # nothing to merge
+        return board.drop(columns=["name_key"], errors="ignore")
+
+    merged = board.copy()
+
+    if open_df is not None:
+        merged = merged.merge(
+            open_df[["name_key", "odds_1plus"]].rename(columns={"odds_1plus": "odds_open_1plus"}),
+            on="name_key",
+            how="left",
+        )
+    else:
+        merged["odds_open_1plus"] = float("nan")
+
+    if close_df is not None:
+        merged = merged.merge(
+            close_df[["name_key", "odds_1plus"]].rename(columns={"odds_1plus": "odds_close_1plus"}),
+            on="name_key",
+            how="left",
+        )
+    else:
+        merged["odds_close_1plus"] = float("nan")
+
+    # if we only had the old file, keep a friendly alias too
+    if "odds_open_1plus" in merged.columns and "odds_1plus" not in merged.columns:
+        merged["odds_1plus"] = merged["odds_open_1plus"]
+
+    merged["implied_prob_open_1plus"] = merged["odds_open_1plus"].map(american_to_implied_prob)
+    merged["implied_prob_close_1plus"] = merged["odds_close_1plus"].map(american_to_implied_prob)
+
+    # model prob column (this is what we compare against the market)
+    model_col = "p_hr_1plus_sim" if "p_hr_1plus_sim" in merged.columns else ("p_hr_1plus" if "p_hr_1plus" in merged.columns else None)
+
+    if model_col is not None:
+        merged["edge_open_1plus"] = merged[model_col] - merged["implied_prob_open_1plus"]
+        merged["edge_close_1plus"] = merged[model_col] - merged["implied_prob_close_1plus"]
+    else:
+        merged["edge_open_1plus"] = float("nan")
+        merged["edge_close_1plus"] = float("nan")
+
+    # CLV (probability space): positive = the market moved toward your side (close implied prob > open implied prob)
+    merged["clv_prob_1plus"] = merged["implied_prob_close_1plus"] - merged["implied_prob_open_1plus"]
+    merged["clv_pct_1plus"] = (merged["implied_prob_close_1plus"] / merged["implied_prob_open_1plus"]) - 1.0
+
+    # Keep your existing one-file columns for compatibility with your current board layout
+    # (these show up when only open is present)
+    merged["odds_1plus"] = merged.get("odds_1plus", merged.get("odds_open_1plus"))
+    merged["implied_prob_1plus"] = merged.get("implied_prob_1plus", merged.get("implied_prob_open_1plus"))
+    merged["edge_1plus"] = merged.get("edge_1plus", merged.get("edge_open_1plus"))
+
+    # Sort preference: by edge_open if available, else edge_1plus, else leave as-is
+    sort_col = "edge_open_1plus" if merged["edge_open_1plus"].notna().any() else ("edge_1plus" if "edge_1plus" in merged.columns else None)
+    if sort_col is not None:
+        merged = merged.sort_values(by=sort_col, ascending=False, na_position="last")
+
+    return merged.drop(columns=["name_key"], errors="ignore")
 def get_json(url: str, timeout: int = 25):
     r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (HRBoard)"})
     r.raise_for_status()
@@ -119,38 +359,6 @@ def get_player_name(player_id: int) -> str:
 
     PLAYER_NAME_CACHE[player_id] = name
     return name
-
-
-# -------------------------
-# Handedness cache (for platoon)
-# -------------------------
-HANDEDNESS_CACHE: dict[int, tuple[str, str]] = {}
-
-def get_handedness(player_id: int) -> tuple[str, str]:
-    """Return (bat_side, pitch_hand) codes like ('L','R').
-    For pitchers, bat_side may be ''.
-    For batters, pitch_hand may be ''.
-    Uses StatsAPI person endpoint and caches per run.
-    """
-    if player_id in HANDEDNESS_CACHE:
-        return HANDEDNESS_CACHE[player_id]
-
-    bat_side = ""
-    pitch_hand = ""
-    try:
-        j = statsapi.get("person", {"personId": int(player_id)})
-        people = j.get("people", [])
-        if people and isinstance(people[0], dict):
-            p = people[0]
-            bat_side = ((p.get("batSide") or {}).get("code") or "").upper()
-            pitch_hand = ((p.get("pitchHand") or {}).get("code") or "").upper()
-    except Exception:
-        pass
-
-    bat_side = (bat_side[:1] if bat_side else "")
-    pitch_hand = (pitch_hand[:1] if pitch_hand else "")
-    HANDEDNESS_CACHE[player_id] = (bat_side, pitch_hand)
-    return bat_side, pitch_hand
 
 
 # -------------------------
@@ -254,7 +462,9 @@ def build_pitch_mix_and_batter_damage(stat_df: pd.DataFrame) -> tuple[pd.DataFra
     mix_p = mix_p.reset_index()
 
     return mix_p, damage
-  def compute_park_factors(stat_df: pd.DataFrame, k_barrel: int = 1500, k_fb: int = 2000) -> pd.DataFrame:
+
+
+def compute_park_factors(stat_df: pd.DataFrame, k_barrel: int = 1500, k_fb: int = 2000) -> pd.DataFrame:
     """Compute park HR conversion multipliers keyed by home_team.
 
     We build two conversion rates and compare them to league baselines:
@@ -336,8 +546,6 @@ def build_pitch_mix_and_batter_damage(stat_df: pd.DataFrame) -> tuple[pd.DataFra
         "hr_per_barrel_shrunk",
         "hr_per_fb_shrunk",
     ]]
-
-
 def compute_bullpen_factors(stat_all: pd.DataFrame) -> pd.DataFrame:
     """
     Build bullpen HR/PA factors by team from Statcast training data.
@@ -398,66 +606,7 @@ def compute_bullpen_factors(stat_all: pd.DataFrame) -> pd.DataFrame:
     return team_bp[["team", "bullpen_factor"]]
 
 
-# -------------------------
-# Platoon Splits (batter vs pitcher handedness)
-# -------------------------
-def compute_batter_platoon_splits(stat_all: pd.DataFrame, prior_strength: int = 300) -> pd.DataFrame:
-    """Compute shrunk batter HR/PA splits vs LHP/RHP.
-
-    Uses Statcast columns:
-      - 'p_throws': pitcher handedness (L/R)
-
-    Returns columns:
-      batter, hr_pa_overall_shrunk, hr_pa_vs_R_shrunk, hr_pa_vs_L_shrunk
-    """
-    req = {"batter", "events", "p_throws"}
-    if stat_all is None or getattr(stat_all, "empty", True) or not req.issubset(set(stat_all.columns)):
-        return pd.DataFrame(columns=["batter","hr_pa_overall_shrunk","hr_pa_vs_R_shrunk","hr_pa_vs_L_shrunk"])
-
-    pa = stat_all[stat_all["events"].notna()].copy()
-    if pa.empty:
-        return pd.DataFrame(columns=["batter","hr_pa_overall_shrunk","hr_pa_vs_R_shrunk","hr_pa_vs_L_shrunk"])
-
-    pa["is_hr"] = (pa["events"] == "home_run").astype(int)
-
-    # Overall league baseline
-    league_hr_pa = float(pa["is_hr"].sum() / max(1, len(pa)))
-
-    # Batter overall
-    bat_all = pa.groupby("batter").agg(PA=("events","size"), HR=("is_hr","sum")).reset_index()
-    bat_all["hr_pa_overall_shrunk"] = bat_all.apply(
-        lambda r: shrink_rate(r["HR"], r["PA"], prior_mean=league_hr_pa, prior_strength=prior_strength),
-        axis=1
-    )
-
-    # Split by pitcher throws
-    pa["p_throws"] = pa["p_throws"].astype(str).str.upper().str[0]
-    pa = pa[pa["p_throws"].isin(["L","R"])].copy()
-
-    if pa.empty:
-        out = bat_all[["batter","hr_pa_overall_shrunk"]].copy()
-        out["hr_pa_vs_R_shrunk"] = np.nan
-        out["hr_pa_vs_L_shrunk"] = np.nan
-        return out
-
-    split = pa.groupby(["batter","p_throws"]).agg(PA=("events","size"), HR=("is_hr","sum")).reset_index()
-
-    # League split baselines
-    league_split = split.groupby("p_throws").agg(PA=("PA","sum"), HR=("HR","sum")).reset_index()
-    league_split["league_hr_pa"] = league_split["HR"] / league_split["PA"].clip(lower=1)
-    league_map = dict(zip(league_split["p_throws"], league_split["league_hr_pa"]))
-
-    split["hr_pa_shrunk"] = split.apply(
-        lambda r: shrink_rate(r["HR"], r["PA"], prior_mean=float(league_map.get(r["p_throws"], league_hr_pa)), prior_strength=prior_strength),
-        axis=1
-    )
-
-    piv = split.pivot_table(index="batter", columns="p_throws", values="hr_pa_shrunk", aggfunc="mean")
-    piv = piv.rename(columns={"R":"hr_pa_vs_R_shrunk", "L":"hr_pa_vs_L_shrunk"}).reset_index()
-
-    out = bat_all[["batter","hr_pa_overall_shrunk"]].merge(piv, on="batter", how="left")
-    return out
-  def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     key = "_".join(map(str, train_seasons))
     bat_path = f"data/processed/bat_{key}.parquet"
     pit_path = f"data/processed/pit_{key}.parquet"
@@ -465,9 +614,8 @@ def compute_batter_platoon_splits(stat_all: pd.DataFrame, prior_strength: int = 
     dmg_path = f"data/processed/dmg_{key}.parquet"
     park_path = f"data/processed/park_{key}.parquet"
     bp_path = f"data/processed/bullpen_{key}.parquet"
-    platoon_path = f"data/processed/platoon_{key}.parquet"
 
-    if all(os.path.exists(p) for p in [bat_path, pit_path, mix_path, dmg_path, park_path, bp_path, platoon_path]):
+    if all(os.path.exists(p) for p in [bat_path, pit_path, mix_path, dmg_path, park_path, bp_path]):
         return (
             pd.read_parquet(bat_path),
             pd.read_parquet(pit_path),
@@ -475,7 +623,6 @@ def compute_batter_platoon_splits(stat_all: pd.DataFrame, prior_strength: int = 
             pd.read_parquet(dmg_path),
             pd.read_parquet(park_path),
             pd.read_parquet(bp_path),
-            pd.read_parquet(platoon_path),
         )
 
     all_stat = []
@@ -502,7 +649,6 @@ def compute_batter_platoon_splits(stat_all: pd.DataFrame, prior_strength: int = 
     mix_p, dmg_b = build_pitch_mix_and_batter_damage(stat_all)
     park = compute_park_factors(stat_all)
     bullpen = compute_bullpen_factors(stat_all)
-    platoon = compute_batter_platoon_splits(stat_all)
 
     bat_all.to_parquet(bat_path, index=False)
     pit_all.to_parquet(pit_path, index=False)
@@ -510,9 +656,8 @@ def compute_batter_platoon_splits(stat_all: pd.DataFrame, prior_strength: int = 
     dmg_b.to_parquet(dmg_path, index=False)
     park.to_parquet(park_path, index=False)
     bullpen.to_parquet(bp_path, index=False)
-    platoon.to_parquet(platoon_path, index=False)
 
-    return bat_all, pit_all, mix_p, dmg_b, park, bullpen, platoon
+    return bat_all, pit_all, mix_p, dmg_b, park, bullpen
 
 
 # -------------------------
@@ -564,7 +709,9 @@ def train_or_load_hr_model(bat_df: pd.DataFrame, train_seasons: list[int]):
     json.dump({"league_hr_pa": league_hr_pa, "train_seasons": train_seasons}, open(meta_path, "w"))
 
     return model, iso, {"league_hr_pa": league_hr_pa, "train_seasons": train_seasons}
-  # -------------------------
+
+
+# -------------------------
 # Slate + IDs
 # -------------------------
 def get_games(date_str: str):
@@ -592,6 +739,23 @@ def lookup_player_id_by_name(name: str):
     except Exception:
         return None
 
+
+_TEAM_ID_MEMO: dict[str, int] = {}
+
+def get_team_id(team_name: str) -> int | None:
+    if not team_name:
+        return None
+    if team_name in _TEAM_ID_MEMO:
+        return _TEAM_ID_MEMO[team_name]
+    try:
+        teams = statsapi.lookup_team(team_name)
+        if teams:
+            tid = int(teams[0]["id"])
+            _TEAM_ID_MEMO[team_name] = tid
+            return tid
+    except Exception:
+        pass
+    return None
 
 def get_team_hitters(team_name: str):
     teams = statsapi.lookup_team(team_name)
@@ -666,11 +830,263 @@ def temp_multiplier(temp_f: float | None) -> float:
     if temp_f is None:
         return 1.0
     return float(np.clip(1.0 + 0.04 * ((temp_f - 70.0) / 10.0), 0.85, 1.20))
-  # -------------------------
+
+
+# -------------------------
+# -------------------------
+# Lineups + exp_pa (sharper)
+# -------------------------
+_LINEUP_SLOT_MEMO: dict[tuple, int | None] = {}
+_PLAYER_SEASON_MEMO: dict[tuple, dict] = {}
+
+def _year_from_date(date_str: str) -> int:
+    try:
+        return int(datetime.strptime(date_str, "%Y-%m-%d").year)
+    except Exception:
+        return int(date_cls.today().year)
+
+def fetch_confirmed_lineup_slot(game_pk: int | None, batter_id: int, batting_side: str) -> int | None:
+    """
+    Try to read a *confirmed* batting order slot (1-9) from the MLB StatsAPI feed.
+    Returns None if lineups are not posted yet.
+    """
+    if not game_pk:
+        return None
+    batting_side = (batting_side or "").lower()
+    if batting_side not in {"home", "away"}:
+        return None
+
+    cache_key = ("confirmed", int(game_pk), int(batter_id), batting_side)
+    if cache_key in _LINEUP_SLOT_MEMO:
+        return _LINEUP_SLOT_MEMO[cache_key]
+
+    url = f"https://statsapi.mlb.com/api/v1.1/game/{int(game_pk)}/feed/live"
+    slot = None
+    try:
+        j = get_json(url)
+        bo = (
+            j.get("liveData", {})
+             .get("boxscore", {})
+             .get("teams", {})
+             .get(batting_side, {})
+             .get("battingOrder", [])
+        )
+        if isinstance(bo, list) and bo:
+            # battingOrder is a list of batterIds in order (1..9, then repeats for subs)
+            # We'll take the *first* occurrence of batter_id.
+            for i, bid in enumerate(bo):
+                try:
+                    if int(bid) == int(batter_id):
+                        slot = i + 1
+                        break
+                except Exception:
+                    continue
+            if slot is not None and slot > 9:
+                # Some feeds include bench/PH/PR; clamp to 9 for slot purposes.
+                slot = ((slot - 1) % 9) + 1
+    except Exception:
+        slot = None
+
+    _LINEUP_SLOT_MEMO[cache_key] = slot
+    return slot
+
+
+def fetch_recent_lineup_slot(team_id: int | None, batter_id: int, date_str: str,
+                             lookback_days: int = 14, max_games: int = 12) -> int | None:
+    """
+    If lineups aren't posted yet, estimate lineup slot by looking at the most recent games
+    for this team and taking the modal batting order position for this batter.
+
+    Safe + bounded: looks back `lookback_days` and reads at most `max_games` boxscores.
+    """
+    if not team_id:
+        return None
+
+    season = _year_from_date(date_str)
+    memo_key = ("recent", int(team_id), int(batter_id), season)
+    if memo_key in _LINEUP_SLOT_MEMO:
+        return _LINEUP_SLOT_MEMO[memo_key]
+
+    end_dt = None
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        end_dt = d - timedelta(days=1)
+    except Exception:
+        end_dt = date_cls.today() - timedelta(days=1)
+
+    start_dt = end_dt - timedelta(days=int(lookback_days))
+    url = (
+        "https://statsapi.mlb.com/api/v1/schedule"
+        f"?sportId=1&teamId={int(team_id)}"
+        f"&startDate={start_dt.isoformat()}&endDate={end_dt.isoformat()}"
+    )
+
+    slots = []
+    try:
+        sched = get_json(url)
+        dates = sched.get("dates", []) or []
+        game_pks = []
+        for dd in dates:
+            for g in (dd.get("games", []) or []):
+                pk = g.get("gamePk")
+                if pk is not None:
+                    game_pks.append(int(pk))
+        # most recent first
+        game_pks = list(reversed(game_pks))[: int(max_games)]
+
+        for pk in game_pks:
+            try:
+                bx = get_json(f"https://statsapi.mlb.com/api/v1/game/{pk}/boxscore")
+            except Exception:
+                continue
+
+            teams = bx.get("teams", {}) or {}
+            # Determine which side is the team
+            side = None
+            try:
+                if int(teams.get("home", {}).get("team", {}).get("id")) == int(team_id):
+                    side = "home"
+                elif int(teams.get("away", {}).get("team", {}).get("id")) == int(team_id):
+                    side = "away"
+            except Exception:
+                side = None
+
+            if not side:
+                continue
+
+            bo = teams.get(side, {}).get("battingOrder", [])
+            if not isinstance(bo, list) or not bo:
+                continue
+
+            for i, bid in enumerate(bo[:9]):  # starters order is first 9
+                try:
+                    if int(bid) == int(batter_id):
+                        slots.append(i + 1)
+                        break
+                except Exception:
+                    continue
+
+    except Exception:
+        slots = []
+
+    slot = None
+    if slots:
+        try:
+            slot = collections.Counter(slots).most_common(1)[0][0]
+        except Exception:
+            slot = None
+
+    _LINEUP_SLOT_MEMO[memo_key] = slot
+    return slot
+
+
+def get_player_pa_per_game(player_id: int, season: int) -> float | None:
+    """
+    Pull plateAppearances + gamesPlayed for a player season using StatsAPI.
+    Returns PA/G, or None if unavailable (e.g., pre-season / no stats).
+    """
+    key = (int(player_id), int(season))
+    if key in _PLAYER_SEASON_MEMO:
+        return _PLAYER_SEASON_MEMO[key].get("pa_per_g")
+
+    pa_per_g = None
+    try:
+        j = statsapi.get("person", {
+            "personId": int(player_id),
+            "hydrate": f"stats(group=[hitting],type=[season],season={int(season)})"
+        })
+        stats = (j.get("people", [{}])[0].get("stats", []) or [])
+        # Find the season hitting split
+        for st in stats:
+            if st.get("group", {}).get("displayName") == "hitting":
+                splits = st.get("splits", []) or []
+                if splits:
+                    s0 = splits[0].get("stat", {}) or {}
+                    pa = s0.get("plateAppearances")
+                    gp = s0.get("gamesPlayed")
+                    if pa is not None and gp:
+                        pa = float(pa)
+                        gp = float(gp)
+                        if gp > 0:
+                            pa_per_g = pa / gp
+                            break
+    except Exception:
+        pa_per_g = None
+
+    _PLAYER_SEASON_MEMO[key] = {"pa_per_g": pa_per_g}
+    return pa_per_g
+
+
+def estimate_exp_pa(
+    batter_id: int,
+    team_id: int | None,
+    game_pk: int | None,
+    is_home: bool,
+    date_str: str,
+    pa_last_fallback: float | None = None,
+) -> float:
+    """
+    Best-effort exp_pa:
+      1) If confirmed lineup exists -> slot baseline
+      2) Else recent slot mode -> slot baseline
+      3) Blend with player PA/G for that season (if available)
+      4) Else fallback to Statcast PA proxy (pa_last_fallback)
+
+    Returns a clipped expected PA in [3.3, 5.3].
+    """
+    season = _year_from_date(date_str)
+
+    side = "home" if is_home else "away"
+    slot = fetch_confirmed_lineup_slot(game_pk, batter_id, side)
+    if slot is None:
+        slot = fetch_recent_lineup_slot(team_id, batter_id, date_str)
+
+    # Neutral baselines by lineup slot (starters) — realistic MLB means
+    LINEUP_BASELINES = {
+        1: 4.75,
+        2: 4.65,
+        3: 4.55,
+        4: 4.45,
+        5: 4.35,
+        6: 4.25,
+        7: 4.15,
+        8: 4.05,
+        9: 3.95,
+    }
+
+    # Player PA/G (season) if available
+    pa_per_g = get_player_pa_per_game(batter_id, season)
+
+    if slot in LINEUP_BASELINES:
+        base = float(LINEUP_BASELINES[int(slot)])
+        if pa_per_g is not None:
+            # Blend: player's typical PA/G (captures substitutions + durability) toward slot expectation
+            exp_pa = 0.65 * base + 0.35 * float(pa_per_g)
+        else:
+            exp_pa = base
+    else:
+        # No slot information: use player's PA/G if we have it, else fallback
+        if pa_per_g is not None:
+            exp_pa = float(pa_per_g)
+        else:
+            # Last resort: Statcast PA proxy or a neutral 4.25
+            if pa_last_fallback is not None:
+                pa_last = float(pa_last_fallback)
+                games_proxy = max(pa_last / 4.2, 1.0)
+                exp_pa = float(pa_last / games_proxy)
+            else:
+                exp_pa = 4.25
+
+    # Home team slight reduction (no guaranteed bottom 9th)
+    if is_home:
+        exp_pa -= 0.08
+
+    return float(np.clip(exp_pa, 3.3, 5.3))
+
 # Build Board
 # -------------------------
 def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weather: bool):
-    bat_df, pit_df, mix_df, dmg_df, park_df, bullpen_df, platoon_df = get_training_cached(train_seasons)
+    bat_df, pit_df, mix_df, dmg_df, park_df, bullpen_df = get_training_cached(train_seasons)
     model, calib, meta = train_or_load_hr_model(bat_df, train_seasons)
 
     bat_latest = bat_df.sort_values("season").groupby("batter").tail(1).set_index("batter")
@@ -681,12 +1097,6 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
     dmg_map = dmg_df.set_index("batter").to_dict(orient="index")
 
     bullpen_map = dict(zip(bullpen_df.get("team", []), bullpen_df.get("bullpen_factor", [])))
-    platoon_map = {}
-    try:
-        if platoon_df is not None and not platoon_df.empty:
-            platoon_map = platoon_df.set_index("batter")[["hr_pa_overall_shrunk","hr_pa_vs_R_shrunk","hr_pa_vs_L_shrunk"]].to_dict(orient="index")
-    except Exception:
-        platoon_map = {}
 
     coords = load_stadium_coords()
     games = get_games(date_str)
@@ -722,6 +1132,7 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
             pitcher_id = home_sp_id if side == "away" else away_sp_id
             is_home = (side == "home")
 
+            # Opposing bullpen factor (pitching team = home if away bats, else away)
             pitching_team = home if side == "away" else away
             bullpen_factor = float(bullpen_map.get(pitching_team, 1.0))
             bp_mult = bullpen_adjustment_multiplier(bullpen_factor, w_bp=DEFAULT_W_BP)
@@ -758,36 +1169,15 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
                 env_mult = float(np.clip(park_contact_mult * w_mult, 0.80, 1.30))
 
-                # Platoon multiplier (shrunk batter splits vs pitcher hand, clamped)
-                platoon_mult = 1.0
-                try:
-                    if pitcher_id and hid in platoon_map:
-                        pit_hand = get_handedness(int(pitcher_id))[1]
-                        rec = platoon_map.get(hid, {})
-                        overall = float(rec.get("hr_pa_overall_shrunk", np.nan))
-                        vs_r = float(rec.get("hr_pa_vs_R_shrunk", np.nan))
-                        vs_l = float(rec.get("hr_pa_vs_L_shrunk", np.nan))
+                # ✅ Apply bullpen multiplier here (sniper-safe)
+                p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult, 1e-6, 0.30))
 
-                        if overall > 0 and not np.isnan(overall) and pit_hand in ("R","L"):
-                            split = vs_r if pit_hand == "R" else vs_l
-                            if not np.isnan(split) and split > 0:
-                                platoon_mult = float(np.clip(split / overall, 0.85, 1.15))
-
-                        # Small bonus for true switch hitters vs opposite-hand pitchers
-                        bat_side = get_handedness(int(hid))[0]
-                        if bat_side == "S" and pit_hand in ("R","L"):
-                            platoon_mult = float(np.clip(platoon_mult * 1.02, 0.85, 1.15))
-                except Exception:
-                    platoon_mult = 1.0
-
-                p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, 0.30))
-
+                # exp_pa (expected plate appearances)
+                # Uses confirmed lineup if available; otherwise estimates slot from recent games + season PA/G.
                 pa_last = float(bat_latest.loc[hid, "PA"])
-                games_proxy = max(pa_last / 4.2, 1.0)
-                exp_pa = float(pa_last / games_proxy)
-
-                exp_pa += (0.05 if not is_home else -0.05)
-                exp_pa = float(np.clip(exp_pa, 3.2, 5.2))
+                team_id = get_team_id(batting_team)
+                game_pk = g.get("game_pk")
+                exp_pa = estimate_exp_pa(int(hid), team_id, game_pk, is_home, date_str, pa_last_fallback=pa_last)
 
                 p1, p2 = sim_hr_probs(p_pa_adj, exp_pa, n_sims=n_sims)
 
@@ -805,7 +1195,6 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                     "park_factor": round(park_contact_mult, 3),
                     "weather_mult": round(w_mult, 3),
                     "pitchtype_mult": round(pt_mult, 3),
-                    "platoon_mult": round(platoon_mult, 3),
                 })
 
     board = pd.DataFrame(rows)
@@ -815,14 +1204,11 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
     board = board.sort_values(["p_hr_1plus_sim", "p_hr_pa"], ascending=False).reset_index(drop=True)
     board.insert(0, "rank", np.arange(1, len(board) + 1))
     return board
-  def write_outputs(board: pd.DataFrame, date_str: str, top_n: int):
+
+
+def write_outputs(board: pd.DataFrame, date_str: str, top_n: int):
     csv_path = f"outputs/hr_board_{date_str}.csv"
     html_path = f"outputs/hr_board_{date_str}.html"
-
-    # Add percentage display columns to the CSV (keep raw decimal columns too)
-    for c in ["p_hr_1plus_sim", "p_hr_2plus_sim", "p_hr_pa"]:
-        if c in board.columns:
-            board[f"{c}_pct"] = (board[c] * 100.0).round(2)
 
     board.to_csv(csv_path, index=False)
 
@@ -853,6 +1239,254 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
         f.write(html)
 
 
+# -------------------------
+# Performance Log (daily append + auto-settle yesterday)
+# -------------------------
+
+PERF_LOG_PATH = "outputs/performance_log.csv"
+
+def _safe_int(x):
+    try:
+        if pd.isna(x):
+            return None
+        return int(x)
+    except Exception:
+        return None
+
+
+def _implied_prob_from_american(odds):
+    """American odds (+320/-150) -> implied probability."""
+    if odds is None or (isinstance(odds, float) and np.isnan(odds)):
+        return np.nan
+    s = str(odds).strip().replace(" ", "")
+    if s == "":
+        return np.nan
+    try:
+        v = float(s.replace("+", ""))
+    except Exception:
+        return np.nan
+    if v == 0:
+        return np.nan
+    if v > 0:
+        return 100.0 / (v + 100.0)
+    return (-v) / ((-v) + 100.0)
+
+
+def _ensure_perf_log_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee required columns exist."""
+    required = [
+        "date",
+        "player_name",
+        "batter_id",
+        "team",
+        "bet_type",
+        "bet_price",
+        "close_price",
+        "model_prob",
+        "implied_open_prob",
+        "implied_close_prob",
+        "edge_open_pct",
+        "clv_prob",
+        "clv_pct",
+        "result",
+        "units",
+        "cumulative_units",
+        "drawdown_pct",
+    ]
+    out = df.copy()
+    for c in required:
+        if c not in out.columns:
+            out[c] = np.nan
+    return out[required]
+
+
+def _recompute_cum_and_dd(log_df: pd.DataFrame) -> pd.DataFrame:
+    """Recompute cumulative_units and drawdown_pct from 'units'. NaN units -> 0."""
+    df = log_df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date.astype(str)
+
+    df["units"] = pd.to_numeric(df.get("units", 0), errors="coerce").fillna(0.0)
+
+    # stable sort
+    sort_cols = ["date", "player_name"]
+    for c in sort_cols:
+        if c not in df.columns:
+            sort_cols = ["date"]
+            break
+    df = df.sort_values(sort_cols).reset_index(drop=True)
+
+    df["cumulative_units"] = df["units"].cumsum()
+    peak = df["cumulative_units"].cummax()
+    dd = df["cumulative_units"] - peak
+    df["drawdown_pct"] = np.where(peak != 0, dd / peak, 0.0)
+    return df
+
+
+def append_performance_log(board: pd.DataFrame, run_date_str: str, log_path: str = PERF_LOG_PATH):
+    """
+    Append today's actionable rows (where we have an open odds price) to outputs/performance_log.csv.
+
+    Assumptions:
+    - market_clv.attach_clv(board) has already been called.
+    - Uses odds_open_1plus if present; else falls back to odds_1plus.
+    - model_prob uses p_hr_1plus_sim.
+    """
+    if board is None or board.empty:
+        return
+
+    df = board.copy()
+
+    # Prefer explicit open odds columns (added by market_clv)
+    open_col = "odds_open_1plus" if "odds_open_1plus" in df.columns else ("odds_1plus" if "odds_1plus" in df.columns else None)
+    close_col = "odds_close_1plus" if "odds_close_1plus" in df.columns else None
+
+    if open_col is None:
+        # nothing to log
+        return
+
+    # Only log rows where we actually have an open price
+    mask_open = df[open_col].notna()
+    df = df[mask_open].copy()
+    if df.empty:
+        return
+
+    # Pull implied columns if present; else compute
+    implied_open_col = "implied_prob_open_1plus" if "implied_prob_open_1plus" in df.columns else None
+    implied_close_col = "implied_prob_close_1plus" if "implied_prob_close_1plus" in df.columns else None
+
+    df["bet_price"] = df[open_col]
+    df["close_price"] = df[close_col] if close_col and close_col in df.columns else np.nan
+
+    df["model_prob"] = pd.to_numeric(df.get("p_hr_1plus_sim", np.nan), errors="coerce")
+
+    if implied_open_col:
+        df["implied_open_prob"] = pd.to_numeric(df[implied_open_col], errors="coerce")
+    else:
+        df["implied_open_prob"] = df["bet_price"].map(_implied_prob_from_american)
+
+    if implied_close_col:
+        df["implied_close_prob"] = pd.to_numeric(df[implied_close_col], errors="coerce")
+    else:
+        df["implied_close_prob"] = df["close_price"].map(_implied_prob_from_american)
+
+    df["edge_open_pct"] = df["model_prob"] - df["implied_open_prob"]
+
+    # CLV: probability-space delta, plus a pct-change version (close/open - 1)
+    df["clv_prob"] = df["implied_close_prob"] - df["implied_open_prob"]
+    df["clv_pct"] = (df["implied_close_prob"] / df["implied_open_prob"]) - 1.0
+
+    out = pd.DataFrame({
+        "date": run_date_str,
+        "player_name": df.get("player_name"),
+        "batter_id": df.get("batter_id"),
+        "team": df.get("team"),
+        "bet_type": "HR_1plus",
+        "bet_price": df["bet_price"],
+        "close_price": df["close_price"],
+        "model_prob": df["model_prob"],
+        "implied_open_prob": df["implied_open_prob"],
+        "implied_close_prob": df["implied_close_prob"],
+        "edge_open_pct": df["edge_open_pct"],
+        "clv_prob": df["clv_prob"],
+        "clv_pct": df["clv_pct"],
+        "result": np.nan,
+        "units": np.nan,
+        "cumulative_units": np.nan,
+        "drawdown_pct": np.nan,
+    })
+
+    # Load existing log if exists
+    if os.path.exists(log_path):
+        try:
+            log_df = pd.read_csv(log_path)
+        except Exception:
+            log_df = pd.DataFrame()
+    else:
+        log_df = pd.DataFrame()
+
+    log_df = _ensure_perf_log_schema(log_df) if not log_df.empty else _ensure_perf_log_schema(pd.DataFrame())
+
+    # Prevent duplicates: same date + batter_id + bet_type
+    if not log_df.empty:
+        existing_keys = set(
+            (str(d), str(b), str(t))
+            for d, b, t in zip(log_df["date"].astype(str), log_df["batter_id"].astype(str), log_df["bet_type"].astype(str))
+        )
+    else:
+        existing_keys = set()
+
+    out["__key"] = list(zip(out["date"].astype(str), out["batter_id"].astype(str), out["bet_type"].astype(str)))
+    out = out[~out["__key"].map(lambda k: k in existing_keys)].drop(columns=["__key"])
+    if out.empty:
+        return
+
+    merged = pd.concat([log_df, out], ignore_index=True)
+    merged = _recompute_cum_and_dd(merged)
+
+    merged.to_csv(log_path, index=False)
+
+
+def auto_settle_yesterday_hr_results(run_date_str: str, log_path: str = PERF_LOG_PATH):
+    """
+    Auto-fill 'result' (0/1) for yesterday's logged HR_1plus bets using Statcast events.
+    - Matches on batter_id.
+    - Only fills blank results.
+    """
+    if not os.path.exists(log_path):
+        return
+
+    # Settle based on *today*, not the slate date (prevents future-date test runs from trying to settle the future)
+    try:
+        today = date_cls.today()
+        yday = (today - timedelta(days=1)).isoformat()
+    except Exception:
+        return
+
+    try:
+        log_df = pd.read_csv(log_path)
+    except Exception:
+        return
+
+    if log_df is None or log_df.empty:
+        return
+
+    log_df = _ensure_perf_log_schema(log_df)
+
+    # rows to settle: yday + blank result + HR bet_type
+    ymask = (log_df["date"].astype(str) == yday)
+    rblank = log_df["result"].isna() | (log_df["result"].astype(str).str.strip() == "")
+    hrmask = log_df["bet_type"].astype(str).str.upper().str.contains("HR")
+
+    idxs = log_df.index[ymask & rblank & hrmask].tolist()
+    if not idxs:
+        return
+
+    target_ids = set(_safe_int(log_df.loc[i, "batter_id"]) for i in idxs)
+    target_ids = set(x for x in target_ids if x is not None)
+    if not target_ids:
+        return
+
+    # Pull statcast for yday and get batter ids who homered
+    try:
+        sc = statcast(start_dt=yday, end_dt=yday)
+    except Exception:
+        return
+
+    homered = set()
+    if sc is not None and not sc.empty and "events" in sc.columns and "batter" in sc.columns:
+        hr_df = sc[sc["events"] == "home_run"]
+        if not hr_df.empty:
+            homered = set(pd.to_numeric(hr_df["batter"], errors="coerce").dropna().astype(int).tolist())
+
+    for i in idxs:
+        bid = _safe_int(log_df.loc[i, "batter_id"])
+        if bid is None:
+            continue
+        log_df.loc[i, "result"] = 1 if bid in homered else 0
+
+    log_df = _recompute_cum_and_dd(log_df)
+    log_df.to_csv(log_path, index=False)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, default=str(date_cls.today()))
@@ -872,8 +1506,18 @@ def main():
         print("No board produced.")
         return
 
-    # Attach CLV + market columns (safe if odds files missing)
+    # Merge market odds + edge if inputs/odds_input.csv (or odds_input.csv) exists
+    board["_name_key"] = board["player_name"].map(normalize_player_name)
+    board["_fb_key"] = board["_name_key"].map(name_fallback_key)
     board = market_clv.attach_clv(board)
+
+    # Append actionable rows to performance log (safe if odds missing)
+    append_performance_log(board, args.date)
+
+    # Auto-settle yesterday's HR results using Statcast (safe if no log / no games)
+    auto_settle_yesterday_hr_results(args.date)
+
+    
 
     write_outputs(board, args.date, top_n=args.top)
     print("\nTop 25 (by P(HR>=1) sim):")
