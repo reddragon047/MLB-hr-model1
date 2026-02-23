@@ -17,7 +17,7 @@ from xgboost import XGBRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.isotonic import IsotonicRegression
 from inputs import market_clv
-
+from inputs import platoon
 
 # -------------------------
 # CONFIG
