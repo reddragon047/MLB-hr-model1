@@ -614,8 +614,8 @@ def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.Data
     dmg_path = f"data/processed/dmg_{key}.parquet"
     park_path = f"data/processed/park_{key}.parquet"
     bp_path = f"data/processed/bullpen_{key}.parquet"
-
-    if all(os.path.exists(p) for p in [bat_path, pit_path, mix_path, dmg_path, park_path, bp_path]):
+    platoon_path = f"data/processed/platoon_{key}.parquet"
+    if all(os.path.exists(p) for p in [bat_path, pit_path, mix_path, dmg_path, park_path, bp_path, platoon_path]):
         return (
             pd.read_parquet(bat_path),
             pd.read_parquet(pit_path),
@@ -623,6 +623,7 @@ def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.Data
             pd.read_parquet(dmg_path),
             pd.read_parquet(park_path),
             pd.read_parquet(bp_path),
+            pd.read_parquet(platoon_path),
         )
 
     all_stat = []
@@ -656,8 +657,11 @@ def get_training_cached(train_seasons: list[int]) -> tuple[pd.DataFrame, pd.Data
     dmg_b.to_parquet(dmg_path, index=False)
     park.to_parquet(park_path, index=False)
     bullpen.to_parquet(bp_path, index=False)
-
-    return bat_all, pit_all, mix_p, dmg_b, park, bullpen
+# ---- platoon cache ----
+# Build batter/pitcher handedness & platoon splits once per training cache
+    platoon = platoon.build_platoon_splits(stat_all)  # <-- from your platoon module
+    platoon.to_parquet(platoon_path, index=False)
+    return bat_all, pit_all, mix_p, dmg_b, park, bullpen, platoon
 
 
 # -------------------------
