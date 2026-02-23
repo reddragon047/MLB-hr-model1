@@ -1090,7 +1090,7 @@ def estimate_exp_pa(
 # Build Board
 # -------------------------
 def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weather: bool):
-    bat_df, pit_df, mix_df, dmg_df, park_df, bullpen_df = get_training_cached(train_seasons)
+    bat_df, pit_df, mix_df, dmg_df, park_df, bullpen_df, platoon_df = get_training_cached(train_seasons)
     model, calib, meta = train_or_load_hr_model(bat_df, train_seasons)
 
     bat_latest = bat_df.sort_values("season").groupby("batter").tail(1).set_index("batter")
