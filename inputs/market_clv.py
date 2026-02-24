@@ -81,7 +81,7 @@ def _read_odds_csv(path: str):
     if not os.path.exists(path):
         return None
 
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, encoding="utf-8-sig")
     if df is None or df.empty:
         return None
 
