@@ -1199,15 +1199,23 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                                     platoon_mult = float(np.clip(split / overall, 0.75, 1.25))
 
                         # ---- Final per-PA probability ----
-                        p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, 0.30))   
-                        # ---- Expected PA for lineup slot ----
-                        pa_last_for_slot = league_pa
+                        p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, # ---- Expected PA for lineup slot ----
+                        pa_last_fallback = None
                         if hid in bat_latest.index and "PA" in bat_latest.columns:
-                            pa_last_for_slot = float(
-                                bat_latest.loc[hid, "PA"]
-                            )
+                            try:
+                                pa_last_fallback = float(bat_latest.loc[hid, "PA"])
+                            except Exception:
+                                pa_last_fallback = None
 
-                        exp_pa = float(np.clip(pa_last_for_slot, 2.0, 5.5))
+                        team_id = get_team_id(batting_team)
+                        exp_pa = estimate_exp_pa(
+                            batter_id=hid,
+                            team_id=team_id,
+                            game_pk=None,
+                            is_home=is_home,
+                            date_str=date_str,
+                            pa_last_fallback=pa_last_fallback,
+                        )
 
                         # ---- Simulate ----
                         lam = p_pa_adj * exp_pa
