@@ -1180,69 +1180,60 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
                         env_mult = float(np.clip(park_contact_mult * w_mult, 0.80, 1.30))
 
-                # ---- Pitcher handedness (R/L) ----
-                pitch_hand = ""
-                if pitcher_id:
-                    _, pitch_hand = platoon.get_handedness(int(pitcher_id))
-                pitch_hand = (pitch_hand or "").upper()[:1]
+                        # ---- Pitcher handedness (R/L) ----
+                        pitch_hand = ""
+                        if pitcher_id:
+                            _, pitch_hand = platoon.get_handedness(int(pitcher_id))
+                        pitch_hand = (pitch_hand or "").upper()[:1]
 
-                # ---- Platoon adjustment ----
-                platoon_mult = 1.0
-                if pitch_hand in ("R", "L"):
-                    pinfo = platoon_map.get(int(hid))
-                    if pinfo:
-                        overall = float(pinfo.get("hr_pa_overall_shrunk", np.nan))
-                        if pitch_hand == "R":
-                            split = float(pinfo.get("hr_pa_vs_R_shrunk", np.nan))
-                        else:
-                            split = float(pinfo.get("hr_pa_vs_L_shrunk", np.nan))
+                        # ---- Platoon adjustment ----
+                        platoon_mult = 1.0
+                        if pitch_hand in ("R", "L"):
+                            pinfo = platoon_map.get(int(hid))
+                            if pinfo:
+                                overall = float(pinfo.get("hr_pa_overall_shrunk", np.nan))
+                                split_key = "hr_pa_vs_R_shrunk" if pitch_hand == "R" else "hr_pa_vs_L_shrunk"
+                                split = float(pinfo.get(split_key, np.nan))
 
-                        if not np.isnan(overall) and overall > 0 and not np.isnan(split):
-                            platoon_mult = float(np.clip(split / overall, 0.75, 1.25))
+                                if np.isfinite(overall) and overall > 0 and np.isfinite(split) and split > 0:
+                                    platoon_mult = float(np
 
-                # ---- Final per-PA probability ----
-                p_pa_adj = float(
-                    np.clip(
-                        p_pa * pt_mult * env_mult * bp_mult * platoon_mult,
-                        1e-6,
-                        0.25,
-                    )
-                )
+                        # ---- Final per-PA probability ----
+                        p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, 0.30))   
+                        # ---- Expected PA for lineup slot ----
+                        pa_last_for_slot = league_pa
+                        if hid in bat_latest.index and "PA" in bat_latest.columns:
+                            pa_last_for_slot = float(
+                                bat_latest.loc[hid, "PA"]
+                            )
 
-                # ---- Expected PA for lineup slot ----
-                pa_last_for_slot = league_pa
-                if hid in bat_latest.index and "PA" in bat_latest.columns:
-                    pa_last_for_slot = float(
-                        bat_latest.loc[hid, "PA"]
-                    )
+                        exp_pa = float(np.clip(pa_last_for_slot, 2.0, 5.5))
 
-                exp_pa = float(np.clip(pa_last_for_slot, 2.0, 5.5))
+                        # ---- Simulate ----
+                        lam = p_pa_adj * exp_pa
+                        p1 = float(1.0 - np.exp(-lam))
+                        p2 = float(1.0 - (1.0 + lam) * np.exp(-lam))
 
-                # ---- Simulate ----
-                lam = p_pa_adj * exp_pa
-                p1 = float(1.0 - np.exp(-lam))
-                p2 = float(1.0 - (1.0 + lam) * np.exp(-lam))
+                        rows.append(
+                            {
+                                "date": date_str,
+                                "team": batting_team,
+                                "venue": venue,
+                                "probable_pitcher_faced": pitcher_name,
+                                "player_name": player_name,
+                                "batter_id": int(hid),
+                                "exp_pa": round(exp_pa, 2),
+                                "p_hr_pa": p_pa_adj,
+                                "p_hr_1plus_sim": p1,
+                                "p_hr_2plus_sim": p2,
+                                "park_factor": round(park_contact_mult, 3),
+                                "weather_mult": round(w_mult, 3),
+                                "pitchtype_mult": round(pt_mult, 3),
+                            }
+                        )
 
-                rows.append(
-                    {
-                        "date": date_str,
-                        "team": batting_team,
-                        "venue": venue,
-                        "probable_pitcher_faced": pitcher_name,
-                        "player_name": player_name,
-                        "batter_id": int(hid),
-                        "exp_pa": round(exp_pa, 2),
-                        "p_hr_pa": p_pa_adj,
-                        "p_hr_1plus_sim": p1,
-                        "p_hr_2plus_sim": p2,
-                        "park_factor": round(park_contact_mult, 3),
-                        "weather_mult": round(w_mult, 3),
-                        "pitchtype_mult": round(pt_mult, 3),
-                    }
-                )
-
-                if len(rows) <= 5:
-                    print(f"[DEBUG] appended row #{len(rows)} player={player_name}")
+                        if len(rows) <= 5:
+                            print(f"[DEBUG] appended row #{len(rows)} player={player_name}")
     # ---- Build final board after all rows are collected ----
     board = pd.DataFrame(rows)
     if board.empty:
