@@ -1206,20 +1206,20 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
     p1, p2 = sim_hr_probs(p_pa_adj, exp_pa, n_sims=n_sims)
 
-                rows.append({
-                    "date": date_str,
-                    "team": batting_team,
-                    "venue": venue,
-                    "probable_pitcher_faced": pitcher_name,
-                    "player_name": player_name,
-                    "batter_id": int(hid),
-                    "exp_pa": round(exp_pa, 2),
-                    "p_hr_pa": p_pa_adj,
-                    "p_hr_1plus_sim": p1,
-                    "p_hr_2plus_sim": p2,
-                    "park_factor": round(park_contact_mult, 3),
-                    "weather_mult": round(w_mult, 3),
-                    "pitchtype_mult": round(pt_mult, 3),
+    rows.append({
+        "date": date_str,
+        "team": batting_team,
+        "venue": venue,
+        "probable_pitcher_faced": pitcher_name,
+        "player_name": player_name,
+        "batter_id": int(hid),
+        "exp_pa": round(exp_pa, 2),
+        "p_hr_pa": p_pa_adj,
+        "p_hr_1plus_sim": p1,
+        "p_hr_2plus_sim": p2,
+        "park_factor": round(park_contact_mult, 3),
+        "weather_mult": round(w_mult, 3),
+        "pitchtype_mult": round(pt_mult, 3),
                 })
 
     board = pd.DataFrame(rows)
