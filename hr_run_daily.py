@@ -1199,7 +1199,9 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                                     platoon_mult = float(np.clip(split / overall, 0.75, 1.25))
 
                         # ---- Final per-PA probability ----
-                        p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, # ---- Expected PA for lineup slot ----
+                        p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, 0.30))
+                        
+                        # ---- Expected PA for lineup slot ----                         
                         pa_last_fallback = None
                         if hid in bat_latest.index and "PA" in bat_latest.columns:
                             try:
