@@ -53,7 +53,7 @@ def main():
     ensure_dirs()
 
     board_path = f"outputs/hr_board_{args.date}.csv"
-    odds_path = f"inputs/odds_{args.date}.csv"
+    odds_path = f"inputs/odds_input.csv"
 
     if not os.path.exists(board_path):
         raise FileNotFoundError(f"Missing {board_path}. Run hr_run_daily.py first.")
