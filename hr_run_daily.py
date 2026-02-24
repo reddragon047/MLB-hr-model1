@@ -1220,7 +1220,7 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
         "park_factor": round(park_contact_mult, 3),
         "weather_mult": round(w_mult, 3),
         "pitchtype_mult": round(pt_mult, 3),
-                })
+    })
 
     board = pd.DataFrame(rows)
     if board.empty:
