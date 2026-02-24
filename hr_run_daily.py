@@ -1105,10 +1105,11 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
     coords = load_stadium_coords()
     games = get_games(date_str)
-
+    print(f"[DEBUG] games={len(games)} for {date_str}")
     rows = []
 
     for g in games:
+    print(f"[DEBUG] game: {g.get('away_team')} @ {g.get('home_team')} venue={g.get('venue_name')}")  
         home = g["home_team"]
         away = g["away_team"]
         venue = g["venue_name"]
@@ -1143,7 +1144,7 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
             bp_mult = bullpen_adjustment_multiplier(bullpen_factor, w_bp=DEFAULT_W_BP)
 
             hitter_ids = get_team_hitters(batting_team)
-
+            print(f"[DEBUG] {date_str} {batting_team} hitters={len(hitter_ids)} sample={hitter_ids[:5]}")
             for hid in hitter_ids:
                 if hid not in bat_latest.index:
                     continue
@@ -1221,7 +1222,8 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
         "weather_mult": round(w_mult, 3),
         "pitchtype_mult": round(pt_mult, 3),
     })
-
+    if len(rows) <= 5:
+    print(f"[DEBUG] appended row #{len(rows)} player={player_name}")
     board = pd.DataFrame(rows)
     if board.empty:
         return board
