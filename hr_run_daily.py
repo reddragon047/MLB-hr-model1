@@ -1172,14 +1172,14 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                         baseline = float(meta.get("league_hr_pa", 0.032))
                         pt_mult = float(np.clip((weighted / max(baseline, 1e-6)), 0.85, 1.20))
 
-                env_mult = float(np.clip(park_contact_mult * w_mult, 0.80, 1.30))
-# --- Pitcher handedness (R/L) ---
-pitch_hand = ""
-if pitcher_id:
-    _, pitch_hand = platoon.get_handedness(int(pitcher_id))
-pitch_hand = (pitch_hand or "").upper()[:1]
+    env_mult = float(np.clip(park_contact_mult * w_mult, 0.80, 1.30))
 
-# --- Platoon adjustment ---
+    # --- Pitcher handedness (R/L) ---
+    pitch_hand = ""
+    if pitcher_id:
+        _, pitch_hand = platoon.get_handedness(int(pitcher_id))
+    pitch_hand = (pitch_hand or "").upper()[:1]
+
     # --- Platoon adjustment ---
     platoon_mult = 1.0
     if pitch_hand in ("R", "L"):
