@@ -1109,7 +1109,7 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
     rows = []
 
     for g in games:
-    print(f"[DEBUG] game: {g.get('away_team')} @ {g.get('home_team')} venue={g.get('venue_name')}")  
+        print(f"[DEBUG] game: {g.get('away_team')} @ {g.get('home_team')} venue={g.get('venue_name')}")  
         home = g["home_team"]
         away = g["away_team"]
         venue = g["venue_name"]
