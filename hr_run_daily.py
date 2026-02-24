@@ -1196,7 +1196,7 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                                 split = float(pinfo.get(split_key, np.nan))
 
                                 if np.isfinite(overall) and overall > 0 and np.isfinite(split) and split > 0:
-                                    platoon_mult = float(np
+                                    platoon_mult = float(np.clip(split / overall, 0.75, 1.25))
 
                         # ---- Final per-PA probability ----
                         p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, 0.30))   
