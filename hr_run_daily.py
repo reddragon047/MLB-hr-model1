@@ -1223,7 +1223,7 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
         "pitchtype_mult": round(pt_mult, 3),
     })
     if len(rows) <= 5:
-    print(f"[DEBUG] appended row #{len(rows)} player={player_name}")
+        print(f"[DEBUG] appended row #{len(rows)} player={player_name}")
     board = pd.DataFrame(rows)
     if board.empty:
         return board
