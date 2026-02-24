@@ -1145,13 +1145,18 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
             hitter_ids = get_team_hitters(batting_team)
             print(f"[DEBUG] {date_str} {batting_team} hitters={len(hitter_ids)} sample={hitter_ids[:5]}")
+            # Precompute once — put this ABOVE the for-loop (right after bat_latest is created)
+            league_feat = bat_df[FEATURE_COLS].mean(numeric_only=True).to_frame().T
+
+            # Then modify the loop:
             for hid in hitter_ids:
-                if hid not in bat_latest.index:
-                    continue
+                hid = int(hid)
+                player_name = get_player_name(hid)
 
-                player_name = get_player_name(int(hid))
-
-                feat = bat_latest.loc[hid, FEATURE_COLS].to_frame().T.fillna(0.0)
+                if hid in bat_latest.index:
+                    feat = bat_latest.loc[hid, FEATURE_COLS].to_frame().T.fillna(0.0)
+                else:
+                    feat = league_feat.copy().fillna(0.0)
 
                 p_raw = float(model.predict(feat)[0])
                 p_pa = float(calib.predict([np.clip(p_raw, 1e-6, 0.5)])[0])
