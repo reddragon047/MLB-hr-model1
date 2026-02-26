@@ -1627,7 +1627,7 @@ def main():
     board["_name_key"] = board["player_name"].map(normalize_player_name)
     board["_fb_key"] = board["_name_key"].map(name_fallback_key)
     board = market_clv.attach_clv(board)
-
+    append_calibration_training(board, args.date)
     # Append actionable rows to performance log (safe if odds missing)
     append_performance_log(board, args.date)
 
