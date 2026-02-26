@@ -1304,7 +1304,7 @@ def write_outputs(board: pd.DataFrame, date_str: str, top_n: int):
 # -------------------------
 
 PERF_LOG_PATH = "outputs/performance_log.csv"
-
+CAL_TRAIN_PATH = "outputs/calibration_training.csv"
 def _safe_int(x):
     try:
         if pd.isna(x):
