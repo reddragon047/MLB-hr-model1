@@ -1477,7 +1477,7 @@ def append_performance_log(board: pd.DataFrame, run_date_str: str, log_path: str
 
     merged.to_csv(log_path, index=False)
 
-    def append_calibration_training(board: pd.DataFrame, run_date_str: str, cal_path: str = CAL_TRAIN_PATH):
+def append_calibration_training(board: pd.DataFrame, run_date_str: str, cal_path: str = CAL_TRAIN_PATH):
         """
         Append full-slate predictions (no odds required) to calibration_training.csv.
         Prevent duplicates by date + batter_id.
