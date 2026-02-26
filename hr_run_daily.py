@@ -1222,6 +1222,18 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                         # ---- Simulate ----
                         lam = p_pa_adj * exp_pa
                         p1 = float(1.0 - np.exp(-lam))
+
+                        #---- Optional final calibrator (trained later) ----
+                        FINAL_CAL_PATH = "models/final_calibrator.pk1"
+                        if os.path.exists(FINAL_CAL_PATH):
+                            try:
+                                import pickle
+                                with open(FINAL_CAL_PATH, "rb") as f:
+                                    final_cal = pickle.load(f)
+                                p1 = float(final_cal.predict([p1])[0])
+                            except Exception:
+                                pass
+                                
                         p2 = float(1.0 - (1.0 + lam) * np.exp(-lam))
 
                         rows.append(
