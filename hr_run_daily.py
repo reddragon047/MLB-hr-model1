@@ -1388,21 +1388,13 @@ def append_performance_log(board: pd.DataFrame, run_date_str: str, log_path: str
     open_col = "odds_open_1plus" if "odds_open_1plus" in df.columns else ("odds_1plus" if "odds_1plus" in df.columns else None)
     close_col = "odds_close_1plus" if "odds_close_1plus" in df.columns else None
 
-    if open_col is None:
-        # nothing to log
-        return
-
-    # Only log rows where we actually have an open price
-    mask_open = df[open_col].notna()
-    df = df[mask_open].copy()
-    if df.empty:
-        return
+    
 
     # Pull implied columns if present; else compute
     implied_open_col = "implied_prob_open_1plus" if "implied_prob_open_1plus" in df.columns else None
     implied_close_col = "implied_prob_close_1plus" if "implied_prob_close_1plus" in df.columns else None
 
-    df["bet_price"] = df[open_col]
+    df["bet_price"] = df[open_col] if open_col else np.nan
     df["close_price"] = df[close_col] if close_col and close_col in df.columns else np.nan
 
     df["model_prob"] = pd.to_numeric(df.get("p_hr_1plus_sim", np.nan), errors="coerce")
