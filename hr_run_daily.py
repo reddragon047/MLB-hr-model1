@@ -1477,7 +1477,72 @@ def append_performance_log(board: pd.DataFrame, run_date_str: str, log_path: str
 
     merged.to_csv(log_path, index=False)
 
+    def append_calibration_training(board: pd.DataFrame, run_date_str: str, cal_path: str = CAL_TRAIN_PATH):
+        """
+        Append full-slate predictions (no odds required) to calibration_training.csv.
+        Prevent duplicates by date + batter_id.
+        """
 
+        if board is None or board.empty:
+            return
+
+        df = board.copy()
+
+        required_cols = [
+            "batter_id",
+            "player_name",
+            "team",
+            "venue",
+            "probable_pitcher_faced",
+            "exp_pa",
+            "p_hr_pa",
+            "p_hr_1plus_sim",
+            "p_hr_2plus_sim",
+        ]
+
+        for c in required_cols:
+            if c not in df.columns:
+                df[c] = np.nan
+
+        out = pd.DataFrame({
+            "date": run_date_str,
+            "batter_id": df["batter_id"],
+            "player_name": df["player_name"],
+            "team": df["team"],
+            "venue": df["venue"],
+            "probable_pitcher_faced": df["probable_pitcher_faced"],
+            "exp_pa": df["exp_pa"],
+            "p_hr_pa": df["p_hr_pa"],
+            "p_hr_1plus_sim": df["p_hr_1plus_sim"],
+            "p_hr_2plus_sim": df["p_hr_2plus_sim"],
+            "result_1plus": np.nan,
+        ])
+        
+        if os.path.exists(cal_path):
+            try:
+                existing = pd.read_csv(cal_path)
+            except: Exception:
+                existing = pd.DataFrame()
+        else:
+            existing = pd.DataFrame()
+
+        if not existing.empty and "date" in existing.columns and "batter_id" in existing.columns:
+            existing_keys = set(
+                zip(existing["date"].astype(str), existing["batter_id"].astype(str))
+            )
+            mask = [
+                (str(d), str(b)) not in existing_keys
+                for d, b in zip(out["date"], out["batter_id"])
+            ]
+            out = out[mask]
+
+    if out.empty:
+        return
+
+    combined = pd.concat([existing, out], ignore_index=True)
+    combined.to_csv(cal_path, index=False)
+                
+            
 def auto_settle_yesterday_hr_results(run_date_str: str, log_path: str = PERF_LOG_PATH):
     """
     Auto-fill 'result' (0/1) for yesterday's logged HR_1plus bets using Statcast events.
