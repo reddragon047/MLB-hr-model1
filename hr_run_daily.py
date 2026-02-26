@@ -1365,7 +1365,7 @@ def _recompute_cum_and_dd(log_df: pd.DataFrame) -> pd.DataFrame:
     df = log_df.copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date.astype(str)
 
-    df["units"] = pd.to_numeric(df.get("units", 0), errors="coerce").fillna(0.0)
+    df["units"] = pd.to_numeric(df.get("units"), errors="coerce")
 
     # stable sort
     sort_cols = ["date", "player_name"]
