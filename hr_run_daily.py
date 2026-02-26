@@ -1536,8 +1536,8 @@ def append_calibration_training(board: pd.DataFrame, run_date_str: str, cal_path
             ]
             out = out[mask]
 
-    if out.empty:
-        return
+        if out.empty:
+            return
 
     combined = pd.concat([existing, out], ignore_index=True)
     combined.to_csv(cal_path, index=False)
