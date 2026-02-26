@@ -1516,7 +1516,7 @@ def append_performance_log(board: pd.DataFrame, run_date_str: str, log_path: str
             "p_hr_1plus_sim": df["p_hr_1plus_sim"],
             "p_hr_2plus_sim": df["p_hr_2plus_sim"],
             "result_1plus": np.nan,
-        ])
+        })
         
         if os.path.exists(cal_path):
             try:
