@@ -1521,7 +1521,7 @@ def append_performance_log(board: pd.DataFrame, run_date_str: str, log_path: str
         if os.path.exists(cal_path):
             try:
                 existing = pd.read_csv(cal_path)
-            except: Exception:
+            except Exception:
                 existing = pd.DataFrame()
         else:
             existing = pd.DataFrame()
