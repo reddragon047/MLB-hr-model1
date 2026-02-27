@@ -120,7 +120,7 @@ def topn_hit_table(df: pd.DataFrame, topn_list=(10, 25, 50, 75)) -> pd.DataFrame
                 "date": d,
                 "topN": int(N),
                 "n_in_topN": int(len(top)),
-                "topN_hr_rate": float(top["y".mean()) if len(top) else np.nan,
+                "topN_hr_rate": float(top["y"].mean()) if len(top) else np.nan,
                 "topN_hrs": top_hrs,
                 "total_hrs": total_hrs,
                 "capture_rate": float(top_hrs / total_hrs) if total_hrs > 0 else np.nan,
