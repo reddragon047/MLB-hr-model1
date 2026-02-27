@@ -290,6 +290,9 @@ def main():
     topn_summary = topn_hit_table(bet_df)
     print(topn_summary.to_string(index=False))
 
+    #save Top-N summary as artifact
+    topn_summary.to_csv("outputs/hr_topn_summary.csv",
+
 
 if __name__ == "__main__":
     main()
