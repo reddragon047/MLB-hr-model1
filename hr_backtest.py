@@ -286,6 +286,9 @@ def main():
 
     print("Backtest complete.")
     print(metrics)
+    print("\nTop-N Summary:")
+    topn_summary = topn_hit_table(bet_df)
+    print(topn_summary.to_string(index=False))
 
 
 if __name__ == "__main__":
