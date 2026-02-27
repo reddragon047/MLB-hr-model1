@@ -101,7 +101,7 @@ def main():
         pa_df = (
             day.dropna(subset=["batter", "game_pk" "at_bat_number"])
                 .drop_duplicates(subset=["game_pk", "at_bat_number", "batter"])
-                .groupby("batter, as_index=False)
+                .groupby("batter", as_index=False)
                 .size()
                 .rename(columns={"size": "actual_pa"})
         )
