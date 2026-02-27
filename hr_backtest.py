@@ -35,7 +35,11 @@ def score_predictions(df: pd.DataFrame) -> dict:
 
     brier = float(np.mean((p - y) ** 2))
     logloss = float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
-
+    # AUC (only valid if both classes present)
+    try:
+        auc = float(roc_auc_score(y, p))
+    except ValueError:
+        auc = np.nan
     # simple calibration: bucket probabilities
     bins = np.linspace(0, 1, 11)
     dfc = df.copy()
@@ -50,6 +54,7 @@ def score_predictions(df: pd.DataFrame) -> dict:
         "n": int(len(df)),
         "brier": brier,
         "logloss": logloss,
+        "auc": auc,
     }
     return out, cal
 
