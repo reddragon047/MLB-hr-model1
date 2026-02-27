@@ -58,7 +58,98 @@ def score_predictions(df: pd.DataFrame) -> dict:
     }
     return out, cal
 
+# =============================
+# Lift + Top-N Diagnostics
+# =============================
 
+def decile_lift_table(df: pd.DataFrame, n_bins: int = 10) -> pd.DataFrame:
+    """
+    Bucket predictions into quantile bins (deciles by default)
+    and compare predicted vs actual HR rate.
+    """
+    x = df.dropna(subset=["p", "y"]).copy()
+    x["p"] = x["p"].astype(float)
+    x["y"] = x["y"].astype(int)
+
+    baseline = x["y"].mean()
+
+    x["bin"] = pd.qcut(x["p"], q=n_bins, duplicates="drop")
+
+    g = (
+        x.groupby("bin", observed=True)
+         .agg(
+             n=("y", "size"),
+             avg_p=("p", "mean"),
+             hr_rate=("y", "mean"),
+             min_p=("p", "min"),
+             max_p=("p", "max"),
+         )
+         .reset_index()
+         .sort_values("avg_p", ascending=False)
+    )   
+
+    g["baseline_hr_rate'] = baseline
+    g["lift_vs_baseline"] = g["hr_rate"] / baseline if baseline > 0 else np.nan
+
+    return g
+
+def topn_hit_table(df: pd.DataFrame, topn_list=(10, 25, 50, 75)) -> pd.DataFrame:
+    """
+    For each date:
+        - take Top N by p
+        - compute HR rate in Top N
+        - compute capture rate
+        - compute hit-any rate
+    """
+    x = df.dropna(subset=["date", "p", "y"]).copy()
+    x["p"] = x["p"].astype(float)
+    x["y"] = x["y"].astype(int)
+    x["date"] = x["date"].astype(str)
+
+    out_rows = []
+
+    for d, g in x.groupby("date"):
+        g = g.sort_values("p", ascending=False)
+        total_hrs = int(g["y"].sum())
+
+        for N in topn_list:
+            top= g.head(int(N))
+            top_hrs = int(top["y"].sum())
+
+            out_rows.append({
+                "date": d,
+                "topN": int(N),
+                "n_in_topN": int(len(top)),
+                "topN_hr_rate": float(top["y".mean()) if len(top) else np.nan,
+                "topN_hrs": top_hrs,
+                "total_hrs": total_hrs,
+                "capture_rate": float(top_hrs / total_hrs) if total_hrs > 0 else np.nan,
+                "hit_any": int(top_hrs > 0),
+            })
+
+    daily = pd.DataFrame(out_rows)
+
+    if daily.empty:
+        return daily
+
+    summary = (
+        daily.groupby("topN", as_index=False)
+             .agg(
+                 days=("date", "nunique"),
+                 avg_topN_hr_rate=("topN_hr_rate", "mean"),
+                 total_topN_hrs=("topN_hrs", "sum"),
+                 total_hrs=("total_hrs", "sum"),
+                 avg_capture_rate=("capture_rate", "mean"),
+                 hit_any_rate=("hit_any", "mean"),
+             (
+    )
+    summary["overall_capture_rate"] = (
+        summary["total_topN_hrs"} /
+        summary["total_hrs"].replace(0, np.nan)
+    )
+
+    return summary
+    
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--start", required=True, help="YYYY-MM-DD")
