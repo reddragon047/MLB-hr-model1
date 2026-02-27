@@ -141,7 +141,7 @@ def topn_hit_table(df: pd.DataFrame, topn_list=(10, 25, 50, 75)) -> pd.DataFrame
                  total_hrs=("total_hrs", "sum"),
                  avg_capture_rate=("capture_rate", "mean"),
                  hit_any_rate=("hit_any", "mean"),
-             (
+             )
     )
     summary["overall_capture_rate"] = (
         summary["total_topN_hrs"] /
