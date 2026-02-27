@@ -88,7 +88,7 @@ def decile_lift_table(df: pd.DataFrame, n_bins: int = 10) -> pd.DataFrame:
          .sort_values("avg_p", ascending=False)
     )   
 
-    g["baseline_hr_rate'] = baseline
+    g["baseline_hr_rate"] = baseline
     g["lift_vs_baseline"] = g["hr_rate"] / baseline if baseline > 0 else np.nan
 
     return g
