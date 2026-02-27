@@ -96,6 +96,19 @@ def main():
         try:
             from pybaseball import statcast
             day = statcast(start_dt=d, end_dt=d)
+
+        # --- INSERT PA BLOCK HERE (LINE 99)---
+        pa_df = (
+            day.dropna(subset=["batter", "game_pk" "at_bat_number"])
+                .drop_duplicates(subset=["game_pk", "at_bat_number", "batter"])
+                .groupby("batter, as_index=False)
+                .size()
+                .rename(columns={"size": "actual_pa"})
+        )
+
+        pa_ids = set(pa_df["batter"].astype(int).tolist())
+        #----------------------------------------
+        
         except Exception:
             continue
 
@@ -106,6 +119,7 @@ def main():
             homer_ids = set(int(x) for x in homers["batter"].dropna().astype(int).unique())
 
         tmp = board.copy()
+        tmp = tmp[tmp["batter_id"].astype(int).isin(pa_ids)].copy()
         tmp["y"] = tmp["batter_id"].apply(lambda x: 1 if int(x) in homer_ids else 0)
         tmp["p"] = tmp["p_hr_1plus_sim"].astype(float)
         tmp["date"] = d
