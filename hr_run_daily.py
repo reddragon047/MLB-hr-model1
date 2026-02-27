@@ -1539,8 +1539,8 @@ def append_calibration_training(board: pd.DataFrame, run_date_str: str, cal_path
         if out.empty:
             return
 
-    combined = pd.concat([existing, out], ignore_index=True)
-    combined.to_csv(cal_path, index=False)
+        combined = pd.concat([existing, out], ignore_index=True)
+        combined.to_csv(cal_path, index=False)
                 
             
 def auto_settle_yesterday_hr_results(run_date_str: str, log_path: str = PERF_LOG_PATH):
