@@ -97,17 +97,17 @@ def main():
             from pybaseball import statcast
             day = statcast(start_dt=d, end_dt=d)
 
-        # --- INSERT PA BLOCK HERE (LINE 99)---
-        pa_df = (
-            day.dropna(subset=["batter", "game_pk", "at_bat_number"])
-                .drop_duplicates(subset=["game_pk", "at_bat_number", "batter"])
-                .groupby("batter", as_index=False)
-                .size()
-                .rename(columns={"size": "actual_pa"})
-        )
+            # --- INSERT PA BLOCK HERE (LINE 99)---
+            pa_df = (
+                day.dropna(subset=["batter", "game_pk", "at_bat_number"])
+                    .drop_duplicates(subset=["game_pk", "at_bat_number", "batter"])
+                    .groupby("batter", as_index=False)
+                    .size()
+                    .rename(columns={"size": "actual_pa"})
+            )
 
-        pa_ids = set(pa_df["batter"].astype(int).tolist())
-        #----------------------------------------
+            pa_ids = set(pa_df["batter"].astype(int).tolist())
+            #----------------------------------------
         
         except Exception:
             continue
