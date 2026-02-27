@@ -287,7 +287,7 @@ def main():
     print("Backtest complete.")
     print(metrics)
     print("\nTop-N Summary:")
-    topn_summary = topn_hit_table(bet_df)
+    topn_summary = topn_hit_table(df)
     print(topn_summary.to_string(index=False))
 
     #save Top-N summary as artifact
