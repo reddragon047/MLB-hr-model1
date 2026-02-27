@@ -287,11 +287,11 @@ def main():
     print("Backtest complete.")
     print(metrics)
     print("\nTop-N Summary:")
-    topn_summary = topn_hit_table(df)
+    topn_summary = topn_hit_table(results)
     print(topn_summary.to_string(index=False))
 
     #save Top-N summary as artifact
-    topn_summary.to_csv("outputs/hr_topn_summary.csv"),
+    topn_summary.to_csv("outputs/hr_topn_summary.csv", index=False)
 
 
 if __name__ == "__main__":
