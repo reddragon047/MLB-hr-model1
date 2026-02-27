@@ -99,7 +99,7 @@ def main():
 
         # --- INSERT PA BLOCK HERE (LINE 99)---
         pa_df = (
-            day.dropna(subset=["batter", "game_pk" "at_bat_number"])
+            day.dropna(subset=["batter", "game_pk", "at_bat_number"])
                 .drop_duplicates(subset=["game_pk", "at_bat_number", "batter"])
                 .groupby("batter", as_index=False)
                 .size()
