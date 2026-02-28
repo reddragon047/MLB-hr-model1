@@ -36,7 +36,7 @@ jobs:
         run: |
           python - <<'PY'
           import pathlib
-          p = pathlib.path("hr_run_daily.py")
+          p = Path("hr_run_daily.py")
           t = p.read_text(encoding="utf-8", errors="replace")
           for i,line in enumerate(t.splitlines(), 1):
               if any(c in line for c in ["–","—","‒","﹣","－","−"]):
