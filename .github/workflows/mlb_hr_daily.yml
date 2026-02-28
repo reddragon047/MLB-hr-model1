@@ -1,7 +1,7 @@
 name: MLB HR Daily Board
 
 on:
-  workflow_dispatch:
+  schedule:
     - cron: "0 16 * * *"   # daily 16:00 UTC (adjust anytime)
   workflow_dispatch:
     inputs:
