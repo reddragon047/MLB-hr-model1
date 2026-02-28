@@ -66,6 +66,21 @@ def sim_hr_prob(p_pa: float, exp_pa: float, n_sims: int, seed: int = 42) -> floa
     hr = rng.binomial(n=pa, p=float(np.clip(p_pa, 0.0, 1.0)))
     return float((hr >= 1).mean())
 
+def safe_statcast(start_dt: str, end_dt: str, retries: int = 3, base_sleep: int = 8) -> pd.DataFrame:
+    for i in range(retries):
+        try:
+            return statcast(start_dt=start_dt, end_dt=end_dt)
+        except ParserError as e:
+            wait = base_sleep * (2 ** i)
+            print(f"[WARN] Statcast ParserError ({start_dt}..{end_dt}) retry {i+1}/{retries} in {wait}s: {e}")
+            time.sleep(wait)
+        except Exception as e:
+            wait = base_sleep * (2 ** i)
+            print(f"[WARN] Statcast failed ({start_dt}..{end_dt}) retry {i=1}/{retries} in {wait}s: {e}")
+            time.sleep(wait)
+
+    print(f"[WARN] Statcast failed after retries ({start_dt}..{end_dt}). Returning empty DF.")
+    return pd. DataFrame()
 
 # ---------------------------
 # Statcast pulling + feature building
@@ -74,7 +89,10 @@ def pull_statcast_season(season: int) -> pd.DataFrame:
     # broad regular season window
     start = f"{season}-03-01"
     end = f"{season}-11-15"
-    return statcast(start_dt=start, end_dt=end)
+    df = safe_statcast(start_dt=start, end_dt=end)
+    if df.empty:
+        print(f"[WARN} Empty statcast for season {season} ({start}..{end})")
+    return df
 
 
 def batter_season_features(stat_df: pd.DataFrame, season: int) -> pd.DataFrame:
