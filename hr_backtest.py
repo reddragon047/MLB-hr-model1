@@ -170,9 +170,16 @@ def main():
     # Optional odds history
     odds_df = None
     if args.odds_csv and os.path.exists(args.odds_csv):
-        odds_df = pd.read_csv(args.odds_csv)
-        # expected columns: date, player_name, odds_american
-        odds_df["date"] = odds_df["date"].astype(str)
+        try:
+            odds_df = pd.read_csv(args.odds_csv)
+            odds_df["date"] = odds_df["date"].astype(str)
+        except Exception as e:
+            print(f"[WARN] Failed to read odds_csv: {e}")
+            print("[WARN] continuing withot odds.")
+            odds_df = None
+    else:
+        print("[INFO] No odds_csv provided; skipping odds history.")
+    
 
     for d in daterange(args.start, args.end):
         # Build board (this also pulls schedule, etc.)
