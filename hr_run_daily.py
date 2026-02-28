@@ -51,6 +51,41 @@ BULLPEN_PRIOR_STRENGTH = 3000       # shrinkage strength (higher = more stable)
 # -------------------------
 # Utils
 # -------------------------
+
+# --- Final calibration (isotonic JSON) ---
+_FINAL_CAL = None
+
+def load_isotonic_json(path: str):
+    with open(path, "r") as f:
+        d = json.load(f)
+    x = np.array(d["x"], dtype=float)
+    y = np.array(d["y"], dtype=float)
+    return x, y
+
+def apply_isotonic(x: np.ndarray, y: np.ndarray, p: float) -> float:
+    if p <= x[0]:
+        return float(y[0])
+    if p >= x[-1]:
+        return float(y[-1])
+    return float(np.interp(p, x, y))
+
+def get_final_calibrator():
+    global _FINAL_CAL
+    if _FINAL_CAL is not None:
+        return _FINAL_CAL
+
+    path = "inputs/calibration_isotonic.json"
+    if not os.path.exists(path):
+        _FINAL_CAL = None
+        return None
+
+    try:
+        _FINAL_CAL = load_isotonic_json(path)
+        return _FINAL_CAL
+    except Exception:
+        _FINAL_CAL = None
+        return None
+        
 def ensure_dirs():
     os.makedirs("data/raw", exist_ok=True)
     os.makedirs("data/processed", exist_ok=True)
