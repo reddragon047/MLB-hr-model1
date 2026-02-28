@@ -8,6 +8,8 @@ from datetime import date as date_cls, datetime, timedelta
 
 import numpy as np
 import pandas as pd
+import time
+from pandas.errors import ParserError
 import requests
 
 from pybaseball import statcast
