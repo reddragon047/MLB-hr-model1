@@ -33,16 +33,18 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run HR board
-        run: |
-          DATE_INPUT="${{ github.event.inputs.date }}"
-          SIMS_INPUT="${{ github.event.inputs.sims }}"
-          WEATHER_INPUT="${{ github.event.inputs.weather }}"
+          run: |
+            DATE_INPUT="${{ github.event.inputs.date }}"
+            SIMS_INPUT="${{ github.event.inputs.sims }}"
+            WEATHER_INPUT="${{ github.event.inputs.weather }}"
 
-          if [ -z "$DATE_INPUT" ]; then
-            python hr_run_daily.py --sims "$SIMS_INPUT" --weather "$WEATHER_INPUT"
-          else
-            python hr_run_daily.py --date "$DATE_INPUT" --sims "$SIMS_INPUT" --weather "$WEATHER_INPUT"
-          fi
+            CMD="python hr_run_daily.py"
+            if [ -n "$DATE_INPUT" ]; then CMD="$CMD --date $DATE_INPUT"; fi
+            if [ -n "$SIMS_INPUT" ]; then CMD="$CMD --sims $SIMS_INPUT"; fi
+            if [ "$WEATHER_INPUT" = "true" ]; then CMD="$CMD --weather"; fi
+
+            echo "Running: $CMD"
+            eval $CMD
 
       - name: Upload outputs
         if: always()
