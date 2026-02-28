@@ -1,4 +1,4 @@
-name: MLB HR Daily Board
+name: HR Run Daily
 
 on:
   schedule:
