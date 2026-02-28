@@ -1258,8 +1258,8 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
 
                         # ---- Simulate ----
                         lam = p_pa_adj * exp_pa
-                        p1 = float(1.0 - np.exp(-1am))
-                        p2 = float(1.0 - (1.0 + 1am) * np.exp(-1am))
+                        p1 = float(1.0-np.exp(-1am))
+                        p2 = float(1.0-(1.0+1am)*np.exp(-1am))
 
                         #---- final calibration layer (isotonic JSON) ----
                         cal = get_final_calibrator()
