@@ -50,6 +50,16 @@ jobs:
             --seasons "${{ inputs.seasons }}" \
             $( [ "${{ inputs.weather }}" = "true" ] && echo "--weather" || true )
 
+      - name: Debug outputs folder
+        run: |
+          echo "PWD=$(pwd)"
+          echo "Workspace=$GITHUB_WORKSPACE"
+          ls -lah
+          echo "---- outputs/ ----"
+          ls -lah outputs || true
+          echo "---- find outputs ----"
+          find . -maxdepth 3 -type f -path "*outputs*" -print
+          
       - name: Fit calibration model
         run: |
           python fit_calibration.py \
@@ -61,5 +71,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hr_backtest_outputs
-          path: outputs/*.csv
-                outputs/*.json
+          path: |
+            outputs/*.csv
+            outputs/*.json
