@@ -1195,8 +1195,22 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                                 split_key = "hr_pa_vs_R_shrunk" if pitch_hand == "R" else "hr_pa_vs_L_shrunk"
                                 split = float(pinfo.get(split_key, np.nan))
 
-                                if np.isfinite(overall) and overall > 0 and np.isfinite(split) and split > 0:
-                                    platoon_mult = float(np.clip(split / overall, 0.75, 1.25))
+                        if np.isfinite(overall) ...
+                            platoon_mult = float(np.clip(...))
+
+                        # ---- Confidence-weighted shrinkage ----
+                        pa_total = 0.0
+                        if hid in bat_latest.index and "PA" in bat_latest.columns:
+                            try:
+                                pa_total = float(bat_latest.loc[hid, "PA"])
+                            except Exception:
+                                pa_total = 0.0
+
+                        K_SHRINK = 300.0
+                        weight = pa_total / (pa_total + K_SHRINK)
+
+                        pt_mult = 1.0 + weight * (pt_mult - 1.0)
+                        platoon_mult = 1.0 + weight * (platoon_mult - 1.0)
 
                         # ---- Final per-PA probability ----
                         p_pa_adj = float(np.clip(p_pa * pt_mult * env_mult * bp_mult * platoon_mult, 1e-6, 0.30))   
