@@ -48,8 +48,7 @@ jobs:
             --end "${{ inputs.end_date }}" \
             --sims "${{ inputs.sims }}" \
             --seasons "${{ inputs.seasons }}" \
-            --odds_csv inputs/odds_history.csv
-            $( [ "${{ inputs.weather }}" = "true" ] && echo "--weather" )
+            $( [ "${{ inputs.weather }}" = "true" ] && echo "--weather" || true )
 
       - name: Fit calibration model
         run: |
