@@ -41,7 +41,7 @@ jobs:
           for i, line in enumerate(t.splitlines(), 1):
               if any(c in line for c in ["–","—","‒","﹣","－","−"]):
                   print("BAD DASH at line", i, ":", line)
-          PY
+      PY
           
       - name: Run HR board
         run: |
