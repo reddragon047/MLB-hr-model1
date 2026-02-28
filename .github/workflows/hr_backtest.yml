@@ -50,6 +50,12 @@ jobs:
             --seasons "${{ inputs.seasons }}" \
             $( [ "${{ inputs.weather }}" = "true" ] && echo "--weather" )
 
+      - name: Fit calibration model
+        run: |
+          python fit_calibration.py \
+            --rows_csv outputs/hr_backtest_rows.csv \
+            --out_json outputs/calibrator_isotonic.json
+
       - name: Upload outputs
         uses: actions/upload-artifact@v4
         with:
