@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import time
 from pybaseball import statcast, cache
-
+from sklearn.metrics import roc_auc_score
 cache.enable()  # speeds up repeated pulls & reduces rate-limit pain
 
 def statcast_safe(start_dt: str, end_dt: str, tries: int = 5):
@@ -63,11 +63,16 @@ def score_predictions(df: pd.DataFrame) -> dict:
         .agg(n=("y", "size"), avg_p=("p", "mean"), hr_rate=("y", "mean"))
         .reset_index()
     )
-
+# ---- AUC ----
+try:
+    auc = roc_auc_score(df["actual_hr"], df["p_hr_1plus_sim"])
+except Exception:
+    auc = float("nan")
     out = {
         "n": int(len(df)),
         "brier": brier,
         "logloss": logloss,
+        "auc": auc,
     }
     return out, cal
 
