@@ -4,6 +4,23 @@ from datetime import datetime, timedelta
 from sklearn.metrics import roc_auc_score
 import numpy as np
 import pandas as pd
+import time
+from pybaseball import statcast, cache
+
+cache.enable() # reduces repeat downloads a ton
+
+def statcast_safe(start_dt: str, end_dt: str, tries: int = 6):
+    last_err = None
+    for i in range(tries):
+        try:
+            return statcast(start_dt, end_dt)
+        except pd.errors.ParserError as e:
+            last_err = e
+            time.sleep(5 * (i + 1)) # 5s, 10s, 15s...
+        except Exception as e:
+            last_err = e
+            time.sleep(5 * (i + 1))
+    raise RuntimeError(f"Statcast download failed after retries for {start_dt} -> {end_dt}: {last_err}"
 
 # We reuse your model code by importing build_board()
 # Make sure hr_run_daily.py is in the repo root (same folder).
