@@ -164,7 +164,26 @@ def main():
     summary.to_csv("outputs/hr_backtest_daily.csv", index=False)
     pd.DataFrame([metrics]).to_csv("outputs/hr_backtest_metrics.csv", index=False)
     cal.to_csv("outputs/hr_backtest_calibration.csv", index=False)
+    # ---- Top-N summary (across all dates)----
+    topn_rows = []
+    for n in[5, 10, 25]:
+        top = (
+            results.sort_values("p", ascending=False)
+                    .groupby("date", as_index=False, sort=True)
+                    .head(n)
+        )
 
+        topn_rows.append({
+            "N": n,
+            "n_obs": int(len(topn))
+            "hit_rate": float(topn["y"].mean()) if len(topn) else 0.0,
+            "hr_count": int(topn["y"].sum()) if len(topn) else 0,
+            "days: int(topn["date"].nunique()) if len(topn) else 0,
+        })
+
+        topn_df = pd.Dataframe(topn_rows)
+        topn_df.to_csv("outputs/hr_topn_summary.csv", index=False)
+        
     # Optional “betting” report if odds were provided
     if "odds_american" in results.columns:
         bet_df = results[pd.notna(results["odds_american"])].copy()
