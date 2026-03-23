@@ -1311,7 +1311,7 @@ def write_outputs(board: pd.DataFrame, date_str: str, top_n: int):
     csv_path = f"outputs/hr_board_{date_str}.csv"
     html_path = f"outputs/hr_board_{date_str}.html"
 
-    board.
+
 # --- Output filter to reduce noise on large slates ---
 PROB_FLOOR = 0.12  # 12%
 MAX_ROWS = 50
