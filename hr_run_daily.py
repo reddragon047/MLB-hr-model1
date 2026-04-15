@@ -2506,13 +2506,73 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
         else:
             board["rank_score"] = 0.0
 
-    board = board.sort_values(["daily_matchup_hr_score", "p_hr_1plus_sim", "p_hr_pa"], ascending=False).reset_index(drop=True)
+
+# Clean matchup engine: hot bat + HR-prone pitcher + pitch mix fit + environment
+if "recent_damage_score" not in board.columns:
+    board["recent_damage_score"] = 0.0
+if "recent_barrel_rate" not in board.columns:
+    board["recent_barrel_rate"] = 0.0
+if "recent_hard_hit_rate" not in board.columns:
+    board["recent_hard_hit_rate"] = 0.0
+if "pitchtype_mult" not in board.columns:
+    board["pitchtype_mult"] = 1.0
+if "park_factor" not in board.columns:
+    board["park_factor"] = 1.0
+if "weather_mult" not in board.columns:
+    board["weather_mult"] = 1.0
+if "pitcher_hr_mult" not in board.columns:
+    board["pitcher_hr_mult"] = 1.0
+if "pitcher_hr_score" not in board.columns:
+    board["pitcher_hr_score"] = 50.0
+
+pitcher_score = (
+    0.60 * pd.to_numeric(board["pitcher_hr_score"], errors="coerce").fillna(50.0) +
+    0.40 * ((pd.to_numeric(board["pitcher_hr_mult"], errors="coerce").fillna(1.0) - 1.0) * 100 + 50)
+).clip(lower=0, upper=100)
+
+batter_heat = (
+    0.45 * pd.to_numeric(board["recent_damage_score"], errors="coerce").fillna(0.0) +
+    0.35 * (pd.to_numeric(board["recent_barrel_rate"], errors="coerce").fillna(0.0) * 100.0) +
+    0.20 * (pd.to_numeric(board["recent_hard_hit_rate"], errors="coerce").fillna(0.0) * 100.0)
+).clip(lower=0, upper=100)
+
+pitch_mix_fit = (
+    ((pd.to_numeric(board["pitchtype_mult"], errors="coerce").fillna(1.0) - 1.0) * 100.0) + 50.0
+).clip(lower=0, upper=100)
+
+environment_clean = (
+    0.45 * (((pd.to_numeric(board["park_factor"], errors="coerce").fillna(1.0) - 1.0) * 100.0) + 50.0) +
+    0.35 * (((pd.to_numeric(board["weather_mult"], errors="coerce").fillna(1.0) - 1.0) * 100.0) + 50.0) +
+    0.20 * (((pd.to_numeric(board["pitcher_hr_mult"], errors="coerce").fillna(1.0) - 1.0) * 100.0) + 50.0)
+).clip(lower=0, upper=100)
+
+board["matchup_score_clean"] = (
+    0.35 * pitcher_score +
+    0.30 * batter_heat +
+    0.20 * pitch_mix_fit +
+    0.15 * environment_clean
+).clip(lower=0, upper=100)
+
+board["matchup_label"] = np.where(
+    board["matchup_score_clean"] >= 75, "🔥",
+    np.where(board["matchup_score_clean"] >= 65, "👍",
+             np.where(board["matchup_score_clean"] >= 55, "OK", "👎"))
+)
+
+# Probability stays primary; matchup breaks ties and sharpens daily spots
+board["sort_score"] = (
+    0.75 * pd.to_numeric(board["p_hr_1plus_sim"], errors="coerce").fillna(0.0) +
+    0.18 * (pd.to_numeric(board["matchup_score_clean"], errors="coerce").fillna(50.0) / 100.0) +
+    0.07 * (pd.to_numeric(board["recent_damage_score"], errors="coerce").fillna(0.0) / 100.0)
+)
+
+    board = board.sort_values(["sort_score", "p_hr_1plus_sim", "matchup_score_clean", "recent_damage_score"], ascending=False).reset_index(drop=True)
     board.insert(0, "rank", np.arange(1, len(board) + 1))
     preferred_cols = [
         "rank", "player_name", "power_tier", "matchup_tier", "power_score", "daily_matchup_hr_score", "matchup_score_today",
         "pitcher_vulnerability_score", "pitch_mix_fit_score", "split_advantage_score", "opportunity_score", "environment_score", "recent_damage_score",
         "bet_flag_tier", "bet_flag_score", "bet_flag", "bet_flag_reason",
-        "team", "probable_pitcher_faced", "venue", "p_hr_1plus_sim", "p_hr_2plus_sim", "p_hr_pa",
+        "team", "probable_pitcher_faced", "venue", "p_hr_1plus_sim", "p_hr_2plus_sim", "p_hr_pa", "sort_score", "matchup_score_clean", "matchup_label",
         "power_qualified", "power_gate_mult", "exp_pa", "matchup_mult", "pitchtype_mult", "recent_form_mult", "pitcher_hr_mult", "park_factor", "weather_mult",
         "dominant_pitch", "dominant_pitch_usage", "batter_vs_pitch_ratio", "recent_power_score", "pitcher_hr_score",
         "recent_barrel_rate", "recent_hard_hit_rate", "recent_ev", "exp_bbe_mult", "power_spike_mult", "p_hr_1plus_raw", "calibration_method", "batter_id", "date"
