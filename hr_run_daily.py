@@ -1433,11 +1433,12 @@ def _parse_game_hour_local(game_datetime: str | None) -> int | None:
         return None
 
 
+
 def get_game_weather(lat: float, lon: float, date_str: str, game_hour_local: int | None = None) -> dict:
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
-        "&hourly=temperature_2m,windspeed_10m,winddirection_10m"
+        "&hourly=temperature_2m,windspeed_10m,winddirection_10m,precipitation,rain,snowfall"
         "&daily=temperature_2m_max"
         "&wind_speed_unit=mph"
         "&temperature_unit=fahrenheit&timezone=auto"
@@ -1448,7 +1449,14 @@ def get_game_weather(lat: float, lon: float, date_str: str, game_hour_local: int
         r.raise_for_status()
         j = r.json()
     except Exception:
-        return {"temp_f": None, "wind_speed_mph": None, "wind_dir_deg": None}
+        return {
+            "temp_f": None,
+            "wind_speed_mph": None,
+            "wind_dir_deg": None,
+            "precip_mm": None,
+            "rain_mm": None,
+            "snowfall_cm": None,
+        }
 
     daily_temp = None
     try:
@@ -1463,9 +1471,19 @@ def get_game_weather(lat: float, lon: float, date_str: str, game_hour_local: int
     temps = hourly.get("temperature_2m", []) or []
     speeds = hourly.get("windspeed_10m", []) or []
     dirs = hourly.get("winddirection_10m", []) or []
+    precips = hourly.get("precipitation", []) or []
+    rains = hourly.get("rain", []) or []
+    snows = hourly.get("snowfall", []) or []
 
     if not hours:
-        return {"temp_f": daily_temp, "wind_speed_mph": None, "wind_dir_deg": None}
+        return {
+            "temp_f": daily_temp,
+            "wind_speed_mph": None,
+            "wind_dir_deg": None,
+            "precip_mm": None,
+            "rain_mm": None,
+            "snowfall_cm": None,
+        }
 
     target_hour = 19 if game_hour_local is None else int(game_hour_local)
     best_idx = None
@@ -1481,235 +1499,47 @@ def get_game_weather(lat: float, lon: float, date_str: str, game_hour_local: int
             continue
 
     if best_idx is None:
-        return {"temp_f": daily_temp, "wind_speed_mph": None, "wind_dir_deg": None}
+        return {
+            "temp_f": daily_temp,
+            "wind_speed_mph": None,
+            "wind_dir_deg": None,
+            "precip_mm": None,
+            "rain_mm": None,
+            "snowfall_cm": None,
+        }
 
-    temp_f = daily_temp
-    try:
-        temp_f = float(temps[best_idx])
-    except Exception:
-        pass
+    def _pick(arr):
+        try:
+            return float(arr[best_idx]) if len(arr) > best_idx else None
+        except Exception:
+            return None
 
-    wind_speed_mph = None
-    wind_dir_deg = None
-    try:
-        wind_speed_mph = float(speeds[best_idx])
-    except Exception:
-        pass
-    try:
-        wind_dir_deg = float(dirs[best_idx])
-    except Exception:
-        pass
-
-    return {"temp_f": temp_f, "wind_speed_mph": wind_speed_mph, "wind_dir_deg": wind_dir_deg}
-
-
-def temp_multiplier(temp_f: float | None) -> float:
+    temp_f = _pick(temps)
     if temp_f is None:
-        return 1.0
-    # Wider, more realistic HR sensitivity to temperature.
-    return float(np.clip(1.0 + 0.05 * ((temp_f - 70.0) / 10.0), 0.82, 1.18))
+        temp_f = daily_temp
 
-
-def wind_multiplier(wind_speed_mph: float | None, wind_dir_deg: float | None, out_to_cf_deg: float | None) -> float:
-    if wind_speed_mph is None or wind_dir_deg is None or out_to_cf_deg is None:
-        return 1.0
-
-    speed = float(max(wind_speed_mph, 0.0))
-    if speed < 2.0:
-        return 1.0
-
-    # Meteorological winddirection is where wind comes FROM.
-    # diff ~= 0 => wind in from CF (suppresses HR)
-    # diff ~= 180 => wind out to CF (boosts HR)
-    diff = abs(((float(wind_dir_deg) - float(out_to_cf_deg) + 180.0) % 360.0) - 180.0)
-    inward_component = float(np.cos(np.deg2rad(diff)))
-
-    mult = 1.0 - 0.015 * speed * inward_component
-    return float(np.clip(mult, 0.82, 1.18))
-
-
-
-
-def exp_bbe_multiplier(k_rate: float | None, exp_pa: float | None) -> float:
-    """Sharper contact-path shaping for HR realizability."""
-    try:
-        k = float(k_rate)
-        pa = float(exp_pa)
-    except Exception:
-        return 1.0
-    exp_bbe = pa * max(0.0, 1.0 - k)
-    if exp_bbe < 2.15:
-        return 0.78
-    if exp_bbe < 2.35:
-        return 0.84
-    if exp_bbe < 2.60:
-        return 0.90
-    if exp_bbe < 2.85:
-        return 0.96
-    if exp_bbe >= 3.80:
-        return 1.12
-    if exp_bbe >= 3.45:
-        return 1.08
-    if exp_bbe >= 3.15:
-        return 1.04
-    return 1.0
-    exp_bbe = pa * max(0.0, 1.0 - k)
-    if exp_bbe < 2.4:
-        return 0.85
-    if exp_bbe < 2.8:
-        return 0.96
-    if exp_bbe > 3.5:
-        return 1.05
-    return 1.0
-
-
-def recent_power_spike_multiplier(recent_barrel_rate: float | None,
-                                  recent_hard_hit_rate: float | None,
-                                  recent_ev: float | None) -> float:
-    """Sharper recent-power emphasis for breakout and form spikes."""
-    try:
-        rbr = float(recent_barrel_rate)
-    except Exception:
-        rbr = 0.0
-    try:
-        rhh = float(recent_hard_hit_rate)
-    except Exception:
-        rhh = 0.0
-    try:
-        rev = float(recent_ev)
-    except Exception:
-        rev = 0.0
-
-    mult = 1.0
-
-    if rbr >= 0.18 or rev >= 94.0:
-        mult *= 1.26
-    elif rbr >= 0.14 or rev >= 92.5:
-        mult *= 1.18
-    elif rbr >= 0.10 or rev >= 90.5:
-        mult *= 1.10
-
-    if rhh >= 0.62:
-        mult *= 1.06
-    elif rhh >= 0.54:
-        mult *= 1.03
-
-    return float(np.clip(mult, 0.95, 1.30))
-
-
-def sharpened_pitchtype_multiplier(pt_mult: float | None,
-                                   dominant_pitch_usage: float | None,
-                                   batter_vs_pitch_ratio: float | None) -> float:
-    """
-    Aggressively separate true pitch-matchout edges near the top of the board.
-    """
-    try:
-        pt = float(pt_mult)
-    except Exception:
-        return 1.0
-    try:
-        usage = float(dominant_pitch_usage)
-    except Exception:
-        usage = 0.0
-    try:
-        ratio = float(batter_vs_pitch_ratio)
-    except Exception:
-        ratio = 1.0
-
-    bonus = 1.0
-    if usage >= 0.38 and ratio >= 1.08 and pt > 1.0:
-        bonus = 1.08
-    if usage >= 0.46 and ratio >= 1.15 and pt > 1.0:
-        bonus = 1.14
-    if usage >= 0.54 and ratio >= 1.22 and pt > 1.0:
-        bonus = 1.22
-
-    if usage >= 0.50 and ratio <= 0.92 and pt < 1.0:
-        bonus = 0.92
-    if usage >= 0.58 and ratio <= 0.86 and pt < 1.0:
-        bonus = 0.86
-
-    return float(np.clip(pt * bonus * 1.08, 0.72, 1.42))
-
-
-def apply_team_cluster_boost(board: pd.DataFrame,
-                             prob_col: str = "p_hr_1plus_sim",
-                             team_col: str = "team") -> pd.DataFrame:
-    """
-    Small shared-environment boost when multiple teammates already rate highly.
-    This is applied AFTER row creation and BEFORE final sorting/ranking.
-    """
-    if board.empty or prob_col not in board.columns or team_col not in board.columns:
-        board["cluster_mult"] = 1.0
-        return board
-
-    out = board.copy()
-    prob = pd.to_numeric(out[prob_col], errors="coerce").fillna(0.0)
-
-    # Count hitters per team who already rate as legitimate candidates.
-    counts = out.loc[prob >= 0.12, team_col].value_counts().to_dict()
-
-    def _cluster_mult(team: str) -> float:
-        n = int(counts.get(team, 0))
-        if n >= 5:
-            return 1.20
-        if n == 4:
-            return 1.16
-        if n == 3:
-            return 1.12
-        if n == 2:
-            return 1.08
-        return 1.0
-
-    out["cluster_mult"] = out[team_col].map(_cluster_mult).fillna(1.0)
-    out[prob_col] = np.clip(prob * out["cluster_mult"], 1e-6, 0.999)
-
-    if "p_hr_pa" in out.columns:
-        out["p_hr_pa"] = np.clip(pd.to_numeric(out["p_hr_pa"], errors="coerce").fillna(0.0) * out["cluster_mult"], 1e-6, 0.30)
-
-    if "p_hr_2plus_sim" in out.columns:
-        out["p_hr_2plus_sim"] = np.clip(pd.to_numeric(out["p_hr_2plus_sim"], errors="coerce").fillna(0.0) * out["cluster_mult"], 1e-6, 0.999)
-
-    return out
-
-
-def apply_conviction_boost(board: pd.DataFrame,
-                           prob_col: str = "p_hr_1plus_sim") -> pd.DataFrame:
-    """
-    Force stronger separation among the best raw probabilities so the top of the
-    board behaves more like a betting engine than a flat candidate list.
-    """
-    if board.empty or prob_col not in board.columns:
-        board["conviction_mult"] = 1.0
-        return board
-
-    out = board.copy()
-    out["conviction_mult"] = 1.0
-    out = out.sort_values(prob_col, ascending=False).reset_index(drop=True)
-
-    top_n = min(len(out), 25)
-    for i in range(top_n):
-        if i < 5:
-            out.at[i, "conviction_mult"] = 1.12
-        elif i < 10:
-            out.at[i, "conviction_mult"] = 1.08
-        elif i < 20:
-            out.at[i, "conviction_mult"] = 1.05
-        else:
-            out.at[i, "conviction_mult"] = 1.02
-
-    out[prob_col] = np.clip(pd.to_numeric(out[prob_col], errors="coerce").fillna(0.0) * out["conviction_mult"], 1e-6, 0.999)
-    if "p_hr_pa" in out.columns:
-        out["p_hr_pa"] = np.clip(pd.to_numeric(out["p_hr_pa"], errors="coerce").fillna(0.0) * out["conviction_mult"], 1e-6, 0.35)
-    if "p_hr_2plus_sim" in out.columns:
-        out["p_hr_2plus_sim"] = np.clip(pd.to_numeric(out["p_hr_2plus_sim"], errors="coerce").fillna(0.0) * out["conviction_mult"], 1e-6, 0.999)
-
-    return out
+    return {
+        "temp_f": temp_f,
+        "wind_speed_mph": _pick(speeds),
+        "wind_dir_deg": _pick(dirs),
+        "precip_mm": _pick(precips),
+        "rain_mm": _pick(rains),
+        "snowfall_cm": _pick(snows),
+    }
 
 
 def compute_weather_multiplier(loc: dict | None, home_team: str, game_datetime: str | None, date_str: str) -> tuple[float, dict]:
     if not loc or "lat" not in loc or "lon" not in loc:
-        return 1.0, {"temp_f": None, "wind_speed_mph": None, "wind_dir_deg": None, "temp_mult": 1.0, "wind_mult": 1.0}
+        return 1.0, {
+            "temp_f": None,
+            "wind_speed_mph": None,
+            "wind_dir_deg": None,
+            "precip_mm": None,
+            "rain_mm": None,
+            "snowfall_cm": None,
+            "temp_mult": 1.0,
+            "wind_mult": 1.0,
+        }
 
     game_hour = _parse_game_hour_local(game_datetime)
     weather = get_game_weather(float(loc["lat"]), float(loc["lon"]), date_str, game_hour_local=game_hour)
@@ -1717,10 +1547,38 @@ def compute_weather_multiplier(loc: dict | None, home_team: str, game_datetime: 
     if out_to_cf_deg is None:
         out_to_cf_deg = DEFAULT_OUT_TO_CF_BEARINGS.get(home_team)
 
-    t_mult = temp_multiplier(weather.get("temp_f"))
-    w_mult = wind_multiplier(weather.get("wind_speed_mph"), weather.get("wind_dir_deg"), out_to_cf_deg)
+    temp_f = weather.get("temp_f")
+    wind_speed = weather.get("wind_speed_mph")
+    wind_dir = weather.get("wind_dir_deg")
+    precip_mm = weather.get("precip_mm")
+    snowfall_cm = weather.get("snowfall_cm")
+
+    t_mult = temp_multiplier(temp_f)
+    w_mult = wind_multiplier(wind_speed, wind_dir, out_to_cf_deg)
     final_mult = float(np.clip(t_mult * w_mult, 0.72, 1.20))
-    weather.update({"temp_mult": round(t_mult, 3), "wind_mult": round(w_mult, 3), "out_to_cf_deg": out_to_cf_deg})
+
+    # Generic weather-only suppression
+    if temp_f is not None:
+        if temp_f <= 38:
+            final_mult *= 0.60
+        elif temp_f <= 45:
+            final_mult *= 0.80
+        elif temp_f <= 50:
+            final_mult *= 0.92
+
+    if snowfall_cm is not None and snowfall_cm > 0:
+        final_mult *= 0.60
+    elif precip_mm is not None and precip_mm >= 2.5:
+        final_mult *= 0.75
+    elif precip_mm is not None and precip_mm >= 0.8:
+        final_mult *= 0.90
+
+    final_mult = float(np.clip(final_mult, 0.55, 1.20))
+    weather.update({
+        "temp_mult": round(t_mult, 3),
+        "wind_mult": round(w_mult, 3),
+        "out_to_cf_deg": out_to_cf_deg,
+    })
     return final_mult, weather
 
 
@@ -2313,8 +2171,6 @@ def build_board(date_str: str, n_sims: int, train_seasons: list[int], use_weathe
                     baseline_hr_pa=baseline,
                     batter_bbe=batter_bbe,
                 )
-                print("[DEBUG] sharpened exists?", "sharpened_pitchtype_multiplier" in globals())
-                print("[DEBUG] globals sample:", [k for k in globals().keys() if "pitch" in k.lower()])
                 pt_mult = sharpened_pitchtype_multiplier(
                     pt_mult=pt_mult,
                     dominant_pitch_usage=dominant_pitch_usage,
